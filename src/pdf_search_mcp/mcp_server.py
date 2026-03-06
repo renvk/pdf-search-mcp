@@ -125,7 +125,7 @@ def stats() -> str:
     if info["subfolders"]:
         lines.append("Subfolders:")
         for name, cnt in info["subfolders"].items():
-            lines.append(f"  {name}: {cnt} files")
+            lines.append(f"  {name or '(root)'}: {cnt} files")
     return "\n".join(lines)
 
 

@@ -115,6 +115,7 @@ def index_pdfs(pdf_dir=None):
                 subfolder = str(rel) if rel.parts else ""
 
                 try:
+                    pages_before = pages_indexed
                     with fitz.open(str(filepath)) as doc:
                         for page_num in range(len(doc)):
                             text = doc[page_num].get_text()
@@ -124,7 +125,8 @@ def index_pdfs(pdf_dir=None):
                                     (fname, subfolder, page_num + 1, text),
                                 )
                                 pages_indexed += 1
-                    files_indexed += 1
+                    if pages_indexed > pages_before:
+                        files_indexed += 1
                 except Exception as e:
                     errors.append((fname, str(e)))
 
@@ -398,11 +400,12 @@ def _cli():
             print(f"  DB size:      {info['db_size_mb']} MB")
             print(f"  Subfolders:")
             for name, cnt in info["subfolders"].items():
-                print(f"    {name:30s} {cnt:4d} files")
+                print(f"    {name or '(root)':30s} {cnt:4d} files")
 
         elif cmd == "reindex":
             pdf_dir = sys.argv[2] if len(sys.argv) > 2 else None
-            print("Dropped existing index.")
+            if DB_PATH.exists():
+                print("Dropped existing index.")
             result = reindex_pdfs(pdf_dir)
             print(f"Indexed {result['files_indexed']} files, {result['pages_indexed']} pages in {result['elapsed']:.1f}s")
 

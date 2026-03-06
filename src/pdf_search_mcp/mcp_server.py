@@ -89,10 +89,13 @@ def read_page_image(filename: str, page: int, dpi: int = 150, subfolder: str = "
     or tables that don't extract well as text. Returns a file path — use the
     Read tool on that path to view the rendered image.
 
+    For pages with mathematical formulas or equations, use dpi=300 or higher.
+    If formulas are still unreadable, retry at 450-600 dpi.
+
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        dpi: Render resolution (default 150, use 200-300 for small text, max 600).
+        dpi: Render resolution (default 150, 300+ for formulas/equations, max 600).
         subfolder: Subfolder as shown in search results (needed if duplicate filenames exist).
 
     Returns:

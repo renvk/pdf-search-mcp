@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -113,6 +114,9 @@ def index_pdfs(pdf_dir=None):
 
                 filepath = root_path / fname
                 subfolder = str(rel) if rel.parts else ""
+                # macOS HFS+/APFS returns NFD filenames (ä = a + combining ̈);
+                # normalize to NFC so DB lookups match MCP client input
+                fname_nfc = unicodedata.normalize("NFC", fname)
 
                 try:
                     pages_before = pages_indexed
@@ -122,7 +126,7 @@ def index_pdfs(pdf_dir=None):
                             if text.strip():
                                 conn.execute(
                                     "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
-                                    (fname, subfolder, page_num + 1, text),
+                                    (fname_nfc, subfolder, page_num + 1, text),
                                 )
                                 pages_indexed += 1
                     if pages_indexed > pages_before:
@@ -204,6 +208,9 @@ def _resolve_pdf_path(filename, subfolder=None):
     if not DB_PATH.exists():
         raise PdfSearchError("No index found. Run 'index' first.")
 
+    # Normalize to NFC to match index storage (macOS filenames are NFD)
+    filename = unicodedata.normalize("NFC", filename)
+
     with _get_db(readonly=True) as conn:
         row = conn.execute("SELECT value FROM meta WHERE key = 'pdf_dir'").fetchone()
         if not row:
@@ -226,7 +233,12 @@ def _resolve_pdf_path(filename, subfolder=None):
 
         resolved_subfolder = row["subfolder"]
 
-    filepath = pdf_dir / resolved_subfolder / filename
+    # Use NFD for disk lookup since macOS stores filenames in NFD
+    filename_nfd = unicodedata.normalize("NFD", filename)
+    filepath = pdf_dir / resolved_subfolder / filename_nfd
+    if not filepath.exists():
+        # Fallback: try NFC in case the filesystem isn't macOS
+        filepath = pdf_dir / resolved_subfolder / filename
     if not filepath.exists():
         raise PdfSearchError(f"File not found on disk: {filepath}")
 

@@ -139,14 +139,14 @@ def _restore_near(query: str, saved: list[str]) -> str:
 
 
 def _sanitize_query(query: str) -> str:
-    """Quote tokens containing internal dots, hyphens, or commas for FTS5.
+    """Quote tokens containing internal dots, hyphens, commas, or slashes for FTS5.
 
     Preserves trailing * for prefix search: EN-13445* becomes "EN-13445"*
     """
     tokens = re.findall(r'"[^"]*"|\S+', query)
     sanitized = []
     for t in tokens:
-        if not (t.startswith('"') and t.endswith('"')) and re.search(r"[\.\-,]", t):
+        if not (t.startswith('"') and t.endswith('"')) and re.search(r"[\.\-,/]", t):
             suffix = ""
             if t.endswith("*"):
                 t = t[:-1]

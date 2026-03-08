@@ -76,12 +76,12 @@ class TestHasGermanContent:
         assert _has_german_content("hello world") is False
 
     def test_bug_21_assess_false_positive(self):
-        """Bug #21: 'assess' contains 'ss' digraph → detected as German.
-        This is known/harmless behavior — document it as passing."""
+        """'assess' contains 'ss' digraph → detected as German.
+        Known false positive — harmless, just adds an unused OR variant."""
         assert _has_german_content("assess") is True
 
     def test_bug_21_true_false_positive(self):
-        """Bug #21: 'true' contains 'ue' digraph → detected as German."""
+        """'true' contains 'ue' digraph → detected as German. Same false positive."""
         assert _has_german_content("true") is True
 
 
@@ -221,7 +221,7 @@ class TestExpandGerman:
         result = _expand_german("__NEAR0__ Größe")
         assert "__NEAR0__" in result
 
-    @pytest.mark.xfail(strict=True, reason="Bug #18: * detached from quoted token during German expansion")
+    @pytest.mark.xfail(strict=True, reason="* detached from quoted token during German expansion")
     def test_bug_18_prefix_wildcard_with_german(self):
         """EN-13445* in a query with German triggers sanitize → '"EN-13445"*',
         then _expand_german tokenizes and the * gets detached."""

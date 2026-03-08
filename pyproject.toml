@@ -15,6 +15,9 @@ dependencies = [
     "mcp>=1.0.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [project.urls]
 Homepage = "https://github.com/renvk/pdf-search-mcp"
 Repository = "https://github.com/renvk/pdf-search-mcp"
@@ -22,6 +25,9 @@ Issues = "https://github.com/renvk/pdf-search-mcp/issues"
 
 [project.scripts]
 pdf-search-mcp = "pdf_search_mcp.mcp_server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

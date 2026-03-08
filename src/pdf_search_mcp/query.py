@@ -63,10 +63,18 @@ def _digraph_variants(word: str) -> list[str]:
 
 
 def _has_german_content(text: str) -> bool:
-    """Check if text contains German special characters or their digraph equivalents."""
+    """Check if text contains German chars or enough digraph evidence to suggest German.
+
+    Native German chars (ä, ö, ü, ß and uppercase) always indicate German content.
+    Digraphs (ae, oe, ue, ss) only trigger if at least two different types appear
+    in the query — a single type matches too many English words (e.g. 'pressure',
+    'true', 'assess').
+    """
     if any(c in text for c in _GERMAN_CHARS):
         return True
-    return any(d in text for d in _DIGRAPH_TO_CHAR)
+    lower = text.lower()
+    types_found = sum(1 for d in ("ae", "oe", "ue", "ss") if d in lower)
+    return types_found >= 2
 
 
 def _token_variants(token: str) -> list[str]:
@@ -167,8 +175,8 @@ def _expand_german(query: str) -> str:
     if not _has_german_content(query):
         return query
 
-    # Tokenize preserving quoted phrases
-    parts = re.findall(r'"[^"]*"|\S+', query)
+    # Tokenize preserving quoted phrases (including trailing * for prefix search)
+    parts = re.findall(r'"[^"]*"\*?|\S+', query)
     expanded = []
     for part in parts:
         # Skip FTS5 operators and NEAR placeholders
@@ -176,12 +184,17 @@ def _expand_german(query: str) -> str:
             expanded.append(part)
             continue
 
-        # Quoted phrase
-        if part.startswith('"') and part.endswith('"'):
-            inner = part[1:-1]
+        # Quoted phrase (possibly with trailing * for prefix search)
+        if part.startswith('"') and (part.endswith('"') or part.endswith('"*')):
+            if part.endswith('"*'):
+                inner = part[1:-2]
+                suffix = "*"
+            else:
+                inner = part[1:-1]
+                suffix = ""
             variants = _token_variants(inner)
             if variants:
-                all_forms = [part] + [f'"{v}"' for v in variants]
+                all_forms = [part] + [f'"{v}"{suffix}' for v in variants]
                 expanded.append(f'({" OR ".join(all_forms)})')
             else:
                 expanded.append(part)

@@ -1,7 +1,5 @@
 """Unit tests for query.py — all pure functions, no fixtures needed."""
 
-import pytest
-
 from pdf_search_mcp.query import (
     _digraph_variants,
     _expand_german,
@@ -73,16 +71,15 @@ class TestHasGermanContent:
         assert _has_german_content("Groesse") is True
 
     def test_plain_english(self):
-        assert _has_german_content("hello world") is False
+        assert _has_german_content("pressure vessel") is False
 
-    def test_bug_21_assess_false_positive(self):
-        """'assess' contains 'ss' digraph → detected as German.
-        Known false positive — harmless, just adds an unused OR variant."""
-        assert _has_german_content("assess") is True
+    def test_bug_21_assess_no_false_positive(self):
+        """'assess' has only one digraph type (ss) — not enough to trigger."""
+        assert _has_german_content("assess") is False
 
-    def test_bug_21_true_false_positive(self):
-        """'true' contains 'ue' digraph → detected as German. Same false positive."""
-        assert _has_german_content("true") is True
+    def test_bug_21_true_no_false_positive(self):
+        """'true' has only one digraph type (ue) — not enough to trigger."""
+        assert _has_german_content("true") is False
 
 
 # --- _token_variants ---
@@ -215,16 +212,15 @@ class TestExpandGerman:
         assert "OR" in result
 
     def test_no_german_content(self):
-        assert _expand_german("bolt flange") == "bolt flange"
+        assert _expand_german("pressure vessel") == "pressure vessel"
 
     def test_near_placeholder_skipped(self):
         result = _expand_german("__NEAR0__ Größe")
         assert "__NEAR0__" in result
 
-    @pytest.mark.xfail(strict=True, reason="* detached from quoted token during German expansion")
     def test_bug_18_prefix_wildcard_with_german(self):
         """EN-13445* in a query with German triggers sanitize → '"EN-13445"*',
-        then _expand_german tokenizes and the * gets detached."""
+        then _expand_german must keep * attached to the quoted token."""
         query = _sanitize_query("EN-13445* Größe")
         result = _expand_german(query)
         # The * should stay attached to the quoted token
@@ -236,7 +232,7 @@ class TestExpandGerman:
 
 class TestPrepareQuery:
     def test_plain_text_passthrough(self):
-        assert prepare_query("bolt flange") == "bolt flange"
+        assert prepare_query("pressure vessel") == "pressure vessel"
 
     def test_hyphenated_and_german(self):
         result = prepare_query("EN-13445 Größe")

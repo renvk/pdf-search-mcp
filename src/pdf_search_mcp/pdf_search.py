@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """PDF full-text search tool.
 
-Pre-indexes all PDFs under a directory into a SQLite FTS5 database
-for instant full-text search with snippet extraction.
+Incrementally indexes PDFs under a directory into a SQLite FTS5 database
+for instant full-text search with snippet extraction. Tracks file mtime
+and size to detect new, changed, and deleted PDFs on each sync.
 """
 
 import os

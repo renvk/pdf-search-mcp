@@ -79,10 +79,13 @@ class TestIndexPdfs:
             assert fname == unicodedata.normalize("NFC", fname)
 
     def test_returns_correct_stats(self, temp_db, sample_pdfs):
-        """Return dict with files_indexed and pages_indexed counts."""
+        """Fresh index: all files reported as added, totals match."""
         result = index_pdfs(str(sample_pdfs))
-        assert result["files_indexed"] == 3  # basics, sparse, EN_13445-3
-        assert result["pages_indexed"] == 4  # basics p1+p2, sparse p2, EN_13445-3 p1
+        assert result["files_added"] == 3  # basics, sparse, EN_13445-3
+        assert result["total_files"] == 3
+        assert result["total_pages"] == 4  # basics p1+p2, sparse p2, EN_13445-3 p1
+        assert result["files_updated"] == 0
+        assert result["files_deleted"] == 0
 
     def test_error_no_directory(self, temp_db, monkeypatch):
         """Raise PdfSearchError when no directory specified and env var unset."""
@@ -95,11 +98,16 @@ class TestIndexPdfs:
         with pytest.raises(PdfSearchError, match="not a directory"):
             index_pdfs("/nonexistent/path")
 
-    def test_error_already_indexed(self, indexed_db):
-        """Raise PdfSearchError if index already has data."""
+    def test_noop_when_unchanged(self, indexed_db):
+        """Calling index_pdfs() again with no changes is a no-op."""
         _, pdf_dir = indexed_db
-        with pytest.raises(PdfSearchError, match="already exists"):
-            index_pdfs(str(pdf_dir))
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_added"] == 0
+        assert result["files_updated"] == 0
+        assert result["files_deleted"] == 0
+        assert result["files_unchanged"] == 3
+        assert result["total_files"] == 3
+        assert result["total_pages"] == 4
 
 
 # --- Search ---
@@ -192,9 +200,117 @@ class TestReindexPdfs:
         """Reindex on existing index should succeed."""
         db_path, pdf_dir = indexed_db
         result = reindex_pdfs(str(pdf_dir))
-        assert result["files_indexed"] == 3
+        assert result["total_files"] == 3
+        assert result["files_added"] == 3
 
     def test_works_from_scratch(self, temp_db, sample_pdfs):
         """Reindex when no DB exists should work like a fresh index."""
         result = reindex_pdfs(str(sample_pdfs))
-        assert result["files_indexed"] == 3
+        assert result["total_files"] == 3
+        assert result["files_added"] == 3
+
+
+# --- Incremental Indexing ---
+
+
+class TestIncrementalIndex:
+    """Tests for incremental sync: add, delete, change, and mixed scenarios."""
+
+    def test_new_file_added(self, indexed_db, make_pdf):
+        """A new PDF on disk is detected and indexed."""
+        _, pdf_dir = indexed_db
+        make_pdf(pdf_dir / "extras.pdf", "Extra content about flanges.")
+
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_added"] == 1
+        assert result["files_deleted"] == 0
+        assert result["files_updated"] == 0
+        assert result["total_files"] == 4
+        # new content is searchable
+        hits = search_pdfs("flanges")
+        assert any(r["file"] == "extras.pdf" for r in hits)
+
+    def test_file_deleted(self, indexed_db):
+        """A PDF removed from disk is removed from the index."""
+        _, pdf_dir = indexed_db
+        (pdf_dir / "basics.pdf").unlink()
+
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_deleted"] == 1
+        assert result["files_added"] == 0
+        assert result["total_files"] == 2
+        # deleted file no longer searchable
+        hits = search_pdfs("pressure vessels")
+        assert not any(r["file"] == "basics.pdf" for r in hits)
+
+    def test_file_changed(self, indexed_db, make_pdf):
+        """A modified PDF (different size) is re-extracted."""
+        _, pdf_dir = indexed_db
+        # overwrite basics.pdf with different content
+        make_pdf(pdf_dir / "basics.pdf", "Completely new content about turbines.")
+
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_updated"] == 1
+        assert result["files_added"] == 0
+        assert result["files_deleted"] == 0
+        # old content gone, new content searchable
+        hits = search_pdfs("turbines")
+        assert any(r["file"] == "basics.pdf" for r in hits)
+        hits = search_pdfs("pressure vessels")
+        assert not any(r["file"] == "basics.pdf" for r in hits)
+
+    def test_mixed_changes(self, indexed_db, make_pdf):
+        """Simultaneous add, delete, and update in one sync."""
+        _, pdf_dir = indexed_db
+        # delete sparse.pdf
+        (pdf_dir / "sparse.pdf").unlink()
+        # modify basics.pdf
+        make_pdf(pdf_dir / "basics.pdf", "Updated basics about nozzles.")
+        # add new.pdf
+        make_pdf(pdf_dir / "new.pdf", "Brand new document about gaskets.")
+
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_added"] == 1
+        assert result["files_deleted"] == 1
+        assert result["files_updated"] == 1
+        assert result["files_unchanged"] == 1  # EN_13445-3.pdf
+        assert result["total_files"] == 3  # was 3, -1 +1 = 3
+
+    def test_file_moved_to_drafts(self, indexed_db):
+        """Moving a PDF into _drafts/ is treated as a deletion."""
+        _, pdf_dir = indexed_db
+        drafts = pdf_dir / "_drafts"
+        (pdf_dir / "basics.pdf").rename(drafts / "basics.pdf")
+
+        result = index_pdfs(str(pdf_dir))
+        assert result["files_deleted"] == 1
+        assert result["total_files"] == 2
+
+    def test_files_table_populated_on_fresh_index(self, temp_db, sample_pdfs):
+        """Fresh index populates the files table with mtime and size."""
+        index_pdfs(str(sample_pdfs))
+        conn = sqlite3.connect(str(temp_db))
+        rows = conn.execute("SELECT file, subfolder, mtime, size FROM files").fetchall()
+        conn.close()
+        assert len(rows) == 3
+        # all rows have positive mtime and size
+        for _, _, mtime, size in rows:
+            assert mtime > 0
+            assert size > 0
+
+    def test_corrupted_update_preserves_old_pages(self, indexed_db):
+        """If re-indexing a changed file fails, old pages stay in the index."""
+        _, pdf_dir = indexed_db
+        # Replace basics.pdf with a corrupted (non-PDF) file to trigger an error
+        corrupted = pdf_dir / "basics.pdf"
+        original_size = corrupted.stat().st_size
+        corrupted.write_bytes(b"not a valid pdf file content here")
+        # Ensure size differs so change is detected
+        assert corrupted.stat().st_size != original_size
+
+        result = index_pdfs(str(pdf_dir))
+        assert len(result["errors"]) == 1
+        assert result["files_updated"] == 1  # attempted update
+        # Old content should still be searchable because savepoint rolled back
+        hits = search_pdfs("pressure vessels")
+        assert any(r["file"] == "basics.pdf" for r in hits)

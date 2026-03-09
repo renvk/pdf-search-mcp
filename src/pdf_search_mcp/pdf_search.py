@@ -196,8 +196,8 @@ def index_pdfs(pdf_dir=None):
                 to_update.add(key)
 
         # Phase 4: apply changes
-        # Remove pages and file records for deleted/changed files
-        for fname_nfc, subfolder in to_delete | to_update:
+        # Remove file records for deleted files
+        for fname_nfc, subfolder in to_delete:
             conn.execute(
                 "DELETE FROM pages WHERE file = ? AND subfolder = ?",
                 (fname_nfc, subfolder),
@@ -207,8 +207,33 @@ def index_pdfs(pdf_dir=None):
                 (fname_nfc, subfolder),
             )
 
-        # Index new/changed files
-        for fname_nfc, subfolder in to_add | to_update:
+        # Re-index changed files inside savepoints so a failure
+        # rolls back the delete and preserves old pages
+        for fname_nfc, subfolder in to_update:
+            filepath, mtime, size = desired[(fname_nfc, subfolder)]
+            conn.execute("SAVEPOINT update_file")
+            try:
+                conn.execute(
+                    "DELETE FROM pages WHERE file = ? AND subfolder = ?",
+                    (fname_nfc, subfolder),
+                )
+                conn.execute(
+                    "DELETE FROM files WHERE file = ? AND subfolder = ?",
+                    (fname_nfc, subfolder),
+                )
+                _index_single_pdf(conn, filepath, fname_nfc, subfolder)
+                conn.execute(
+                    "INSERT INTO files (file, subfolder, mtime, size) VALUES (?, ?, ?, ?)",
+                    (fname_nfc, subfolder, mtime, size),
+                )
+                conn.execute("RELEASE update_file")
+            except Exception as e:
+                conn.execute("ROLLBACK TO update_file")
+                conn.execute("RELEASE update_file")
+                errors.append((fname_nfc, str(e)))
+
+        # Index new files
+        for fname_nfc, subfolder in to_add:
             filepath, mtime, size = desired[(fname_nfc, subfolder)]
             try:
                 _index_single_pdf(conn, filepath, fname_nfc, subfolder)

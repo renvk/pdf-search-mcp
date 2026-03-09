@@ -297,3 +297,20 @@ class TestIncrementalIndex:
         for _, _, mtime, size in rows:
             assert mtime > 0
             assert size > 0
+
+    def test_corrupted_update_preserves_old_pages(self, indexed_db):
+        """If re-indexing a changed file fails, old pages stay in the index."""
+        _, pdf_dir = indexed_db
+        # Replace basics.pdf with a corrupted (non-PDF) file to trigger an error
+        corrupted = pdf_dir / "basics.pdf"
+        original_size = corrupted.stat().st_size
+        corrupted.write_bytes(b"not a valid pdf file content here")
+        # Ensure size differs so change is detected
+        assert corrupted.stat().st_size != original_size
+
+        result = index_pdfs(str(pdf_dir))
+        assert len(result["errors"]) == 1
+        assert result["files_updated"] == 1  # attempted update
+        # Old content should still be searchable because savepoint rolled back
+        hits = search_pdfs("pressure vessels")
+        assert any(r["file"] == "basics.pdf" for r in hits)

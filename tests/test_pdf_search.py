@@ -288,7 +288,6 @@ class TestIncrementalIndex:
 
     def test_files_table_populated_on_fresh_index(self, temp_db, sample_pdfs):
         """Fresh index populates the files table with mtime and size."""
-        import sqlite3
         index_pdfs(str(sample_pdfs))
         conn = sqlite3.connect(str(temp_db))
         rows = conn.execute("SELECT file, subfolder, mtime, size FROM files").fetchall()

@@ -53,7 +53,13 @@ def _get_db(readonly=False):
 
 
 def _ensure_schema(conn):
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist.
+
+    Tables:
+        meta — key/value pairs (pdf_dir, total_files, total_pages, last_indexed).
+        pages — FTS5 full-text index (file, subfolder, page, content).
+        files — tracks indexed PDFs for incremental sync (file, subfolder, mtime, size).
+    """
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
@@ -62,20 +68,87 @@ def _ensure_schema(conn):
         CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5(
             file, subfolder, page, content
         );
+        CREATE TABLE IF NOT EXISTS files (
+            file TEXT NOT NULL,
+            subfolder TEXT NOT NULL,
+            mtime REAL NOT NULL,
+            size INTEGER NOT NULL,
+            PRIMARY KEY (file, subfolder)
+        );
     """)
 
 
+def _scan_pdf_dir(pdf_dir):
+    """Walk pdf_dir and collect metadata for all indexable PDFs.
+
+    Args:
+        pdf_dir: Resolved Path to the PDF root directory.
+
+    Returns:
+        List of (filepath, fname_nfc, subfolder, mtime, size) tuples.
+        Skips directories starting with '_' and non-.pdf files.
+    """
+    results = []
+    for root, _dirs, files in os.walk(pdf_dir):
+        root_path = Path(root)
+        rel = root_path.relative_to(pdf_dir)
+        if any(p.startswith("_") for p in rel.parts):
+            continue
+
+        for fname in sorted(files):
+            if not fname.lower().endswith(".pdf"):
+                continue
+
+            filepath = root_path / fname
+            subfolder = str(rel) if rel.parts else ""
+            # macOS HFS+/APFS returns NFD filenames (ä = a + combining ̈);
+            # normalize to NFC so DB lookups match MCP client input
+            fname_nfc = unicodedata.normalize("NFC", fname)
+            stat = filepath.stat()
+            results.append((filepath, fname_nfc, subfolder, stat.st_mtime, stat.st_size))
+    return results
+
+
+def _index_single_pdf(conn, filepath, fname_nfc, subfolder):
+    """Extract text from one PDF and insert non-empty pages into the FTS5 index.
+
+    Args:
+        conn: Open SQLite connection.
+        filepath: Full path to the PDF file on disk.
+        fname_nfc: NFC-normalized filename for DB storage.
+        subfolder: Relative subfolder path (empty string for root).
+
+    Returns:
+        Number of pages inserted (pages with non-empty text).
+    """
+    pages_added = 0
+    with fitz.open(str(filepath)) as doc:
+        for page_num in range(len(doc)):
+            text = doc[page_num].get_text()
+            if text.strip():
+                conn.execute(
+                    "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
+                    (fname_nfc, subfolder, page_num + 1, text),
+                )
+                pages_added += 1
+    return pages_added
+
+
 def index_pdfs(pdf_dir=None):
-    """Walk all subdirectories, extract text with PyMuPDF, store in FTS5.
+    """Incrementally sync the index with the PDF directory on disk.
+
+    On first run, indexes all PDFs. On subsequent runs, detects new, changed,
+    and deleted files by comparing mtime and size against the files table.
 
     Args:
         pdf_dir: Path to the PDF directory. Can also be set via PDF_SEARCH_DIR env var.
 
     Returns:
-        Dict with keys: files_indexed, pages_indexed, elapsed, errors.
+        Dict with keys: files_added, files_updated, files_deleted, files_unchanged,
+        total_files, total_pages, elapsed, errors.
 
     Raises:
-        PdfSearchError: If no directory specified, directory doesn't exist, or index already exists.
+        PdfSearchError: If no directory specified or directory doesn't exist.
     """
     if pdf_dir is None:
         pdf_dir = os.environ.get("PDF_SEARCH_DIR")
@@ -88,53 +161,66 @@ def index_pdfs(pdf_dir=None):
     if not pdf_dir.is_dir():
         raise PdfSearchError(f"'{pdf_dir}' is not a directory.")
 
+    errors = []
+    t0 = time.time()
+
     with _get_db() as conn:
         _ensure_schema(conn)
 
-        existing = conn.execute(
-            "SELECT COUNT(*) FROM pages"
-        ).fetchone()[0]
-        if existing > 0:
-            raise PdfSearchError(f"Index already exists ({existing} pages). Use 'reindex' to rebuild.")
+        # Phase 1: scan disk
+        disk_files = _scan_pdf_dir(pdf_dir)
+        desired = {
+            (f_nfc, sub): (fpath, mt, sz)
+            for fpath, f_nfc, sub, mt, sz in disk_files
+        }
 
-        files_indexed = 0
-        pages_indexed = 0
-        errors = []
-        t0 = time.time()
+        # Phase 2: load indexed set from files table
+        rows = conn.execute("SELECT file, subfolder, mtime, size FROM files").fetchall()
+        indexed = {
+            (r["file"], r["subfolder"]): (r["mtime"], r["size"])
+            for r in rows
+        }
 
-        for root, _dirs, files in os.walk(pdf_dir):
-            root_path = Path(root)
-            rel = root_path.relative_to(pdf_dir)
-            if any(p.startswith("_") for p in rel.parts):
-                continue
+        # Phase 3: compute diff
+        desired_keys = set(desired)
+        indexed_keys = set(indexed)
 
-            for fname in sorted(files):
-                if not fname.lower().endswith(".pdf"):
-                    continue
+        to_add = desired_keys - indexed_keys
+        to_delete = indexed_keys - desired_keys
+        to_update = set()
+        for key in desired_keys & indexed_keys:
+            disk_mtime, disk_size = desired[key][1], desired[key][2]
+            db_mtime, db_size = indexed[key]
+            if disk_mtime != db_mtime or disk_size != db_size:
+                to_update.add(key)
 
-                filepath = root_path / fname
-                subfolder = str(rel) if rel.parts else ""
-                # macOS HFS+/APFS returns NFD filenames (ä = a + combining ̈);
-                # normalize to NFC so DB lookups match MCP client input
-                fname_nfc = unicodedata.normalize("NFC", fname)
+        # Phase 4: apply changes
+        # Remove pages and file records for deleted/changed files
+        for fname_nfc, subfolder in to_delete | to_update:
+            conn.execute(
+                "DELETE FROM pages WHERE file = ? AND subfolder = ?",
+                (fname_nfc, subfolder),
+            )
+            conn.execute(
+                "DELETE FROM files WHERE file = ? AND subfolder = ?",
+                (fname_nfc, subfolder),
+            )
 
-                try:
-                    pages_before = pages_indexed
-                    with fitz.open(str(filepath)) as doc:
-                        for page_num in range(len(doc)):
-                            text = doc[page_num].get_text()
-                            if text.strip():
-                                conn.execute(
-                                    "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
-                                    (fname_nfc, subfolder, page_num + 1, text),
-                                )
-                                pages_indexed += 1
-                    if pages_indexed > pages_before:
-                        files_indexed += 1
-                except Exception as e:
-                    errors.append((fname, str(e)))
+        # Index new/changed files
+        for fname_nfc, subfolder in to_add | to_update:
+            filepath, mtime, size = desired[(fname_nfc, subfolder)]
+            try:
+                _index_single_pdf(conn, filepath, fname_nfc, subfolder)
+                conn.execute(
+                    "INSERT INTO files (file, subfolder, mtime, size) VALUES (?, ?, ?, ?)",
+                    (fname_nfc, subfolder, mtime, size),
+                )
+            except Exception as e:
+                errors.append((fname_nfc, str(e)))
 
-        elapsed = time.time() - t0
+        # Phase 5: recount totals from actual data — no drift possible
+        total_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        total_pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
 
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed', ?)",
@@ -142,20 +228,27 @@ def index_pdfs(pdf_dir=None):
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('total_files', ?)",
-            (str(files_indexed),),
+            (str(total_files),),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('total_pages', ?)",
-            (str(pages_indexed),),
+            (str(total_pages),),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('pdf_dir', ?)",
             (str(pdf_dir),),
         )
 
+    elapsed = time.time() - t0
+    files_unchanged = len(desired_keys & indexed_keys) - len(to_update)
+
     return {
-        "files_indexed": files_indexed,
-        "pages_indexed": pages_indexed,
+        "files_added": len(to_add),
+        "files_updated": len(to_update),
+        "files_deleted": len(to_delete),
+        "files_unchanged": files_unchanged,
+        "total_files": total_files,
+        "total_pages": total_pages,
         "elapsed": elapsed,
         "errors": errors,
     }
@@ -340,7 +433,8 @@ def reindex_pdfs(pdf_dir=None):
         pdf_dir: Path to PDF directory.
 
     Returns:
-        Dict with keys: files_indexed, pages_indexed, elapsed, errors.
+        Dict from index_pdfs(): files_added, files_updated, files_deleted,
+        files_unchanged, total_files, total_pages, elapsed, errors.
     """
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -369,7 +463,14 @@ def _cli():
         if cmd == "index":
             pdf_dir = sys.argv[2] if len(sys.argv) > 2 else None
             result = index_pdfs(pdf_dir)
-            print(f"Indexed {result['files_indexed']} files, {result['pages_indexed']} pages in {result['elapsed']:.1f}s")
+            print(
+                f"Sync complete in {result['elapsed']:.1f}s: "
+                f"+{result['files_added']} added, "
+                f"~{result['files_updated']} updated, "
+                f"-{result['files_deleted']} deleted, "
+                f"={result['files_unchanged']} unchanged"
+            )
+            print(f"Total: {result['total_files']} files, {result['total_pages']} pages")
             if result["errors"]:
                 print(f"  {len(result['errors'])} errors:")
                 for fname, err in result["errors"][:10]:
@@ -419,7 +520,7 @@ def _cli():
             if DB_PATH.exists():
                 print("Dropped existing index.")
             result = reindex_pdfs(pdf_dir)
-            print(f"Indexed {result['files_indexed']} files, {result['pages_indexed']} pages in {result['elapsed']:.1f}s")
+            print(f"Indexed {result['total_files']} files, {result['total_pages']} pages in {result['elapsed']:.1f}s")
 
         else:
             print(f"Unknown command: {cmd}")

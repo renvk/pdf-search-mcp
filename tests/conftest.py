@@ -77,3 +77,18 @@ def indexed_db(temp_db, sample_pdfs):
     """Build an index on sample_pdfs and return (db_path, pdf_dir)."""
     index_pdfs(str(sample_pdfs))
     return temp_db, sample_pdfs
+
+
+@pytest.fixture
+def make_pdf():
+    """Factory fixture: create a single-page PDF with the given text.
+
+    Usage: make_pdf(path, "some text content")
+    """
+    def _make(path, text):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), text)
+        doc.save(str(path))
+        doc.close()
+    return _make

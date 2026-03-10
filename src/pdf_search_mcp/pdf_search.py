@@ -142,7 +142,8 @@ def index_pdfs(pdf_dir=None):
     and deleted files by comparing mtime and size against the files table.
 
     Args:
-        pdf_dir: Path to the PDF directory. Can also be set via PDF_SEARCH_DIR env var.
+        pdf_dir: Path to the PDF directory. Falls back to PDF_SEARCH_DIR env var,
+            then to the pdf_dir stored in the existing index's meta table.
 
     Returns:
         Dict with keys: files_added, files_updated, files_deleted, files_unchanged,
@@ -153,6 +154,16 @@ def index_pdfs(pdf_dir=None):
     """
     if pdf_dir is None:
         pdf_dir = os.environ.get("PDF_SEARCH_DIR")
+    if pdf_dir is None and DB_PATH.exists():
+        try:
+            with _get_db(readonly=True) as conn:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'pdf_dir'"
+                ).fetchone()
+                if row:
+                    pdf_dir = row["value"]
+        except Exception:
+            pass  # DB corrupt or missing meta table — fall through to error
     if pdf_dir is None:
         raise PdfSearchError(
             "No PDF directory specified. Set PDF_SEARCH_DIR environment variable or pass pdf_dir argument."

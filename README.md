@@ -4,7 +4,8 @@ MCP server for full-text search across PDF document collections. Built for AI ag
 
 - **Search entire collections** — pre-indexes all PDFs for instant ranked results with snippets, not one file at a time
 - **Fully offline** — no API keys, no cloud services, just SQLite FTS5 and PyMuPDF
-- **Page rendering** — view formulas, diagrams, and tables as PNG when text extraction isn't enough
+- **Page rendering** — render pages as PNG for formulas, diagrams, and tables; crop to a region with auto-DPI scaling for detail shots
+- **Dual renderer** — CoreGraphics on macOS (sharper math fonts), PyMuPDF on Linux/Windows
 - **German-aware** — automatic expansion of `ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue` so both spellings match
 
 ## Installation
@@ -114,9 +115,9 @@ Uses [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `search` | `query`, `limit=10` | Full-text search with ranked results and snippets |
-| `read_page` | `filename`, `page` | Read the full text of a specific page |
-| `read_page_image` | `filename`, `page`, `dpi=150` | Render a page as PNG (for formulas, diagrams, tables) |
-| `stats` | *(none)* | Show index statistics |
+| `read_page` | `filename`, `page`, `subfolder=""` | Read the full text of a specific page |
+| `read_page_image` | `filename`, `page`, `dpi=140`, `region=None`, `subfolder=""` | Render a page (or cropped region) as PNG. `region=[x1,y1,x2,y2]` with 0.0–1.0 fractional coords to crop; DPI auto-scales for the cropped area |
+| `stats` | *(none)* | Show index statistics (file count, pages, DB size, renderer) |
 
 ## Python API
 
@@ -134,8 +135,11 @@ for r in results:
 # Read full page text
 text = read_pdf_page("document.pdf", 42)
 
-# Render page as PNG
-png_path = render_pdf_page("document.pdf", 42, dpi=150)
+# Render full page as PNG
+png_path = render_pdf_page("document.pdf", 42)
+
+# Render cropped region (DPI auto-scales to maximize detail)
+png_path = render_pdf_page("document.pdf", 42, region=[0.0, 0.5, 1.0, 0.8])
 ```
 
 ## How It Works
@@ -144,9 +148,9 @@ png_path = render_pdf_page("document.pdf", 42, dpi=150)
 
 2. **Searching** runs FTS5 MATCH queries with relevance ranking (`rank`) and returns snippets showing matching context.
 
-3. **Reading** re-opens the original PDF file on disk (path resolved via the stored `pdf_dir` metadata) for full page text or image rendering.
+3. **Reading** re-opens the original PDF file on disk (path resolved via the stored `pdf_dir` metadata) for full page text or image rendering. Region crops auto-scale DPI to fill a 1568 px long-edge budget, maximizing detail without producing oversized images.
 
-The database stores the text content only — original PDFs are accessed on disk for `read_page` and `read_page_image`.
+The database stores the text content only — original PDFs are accessed on disk for `read_page` and `read_page_image`. Rendering uses CoreGraphics on macOS and PyMuPDF elsewhere.
 
 ## License
 

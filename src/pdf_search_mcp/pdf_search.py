@@ -451,7 +451,8 @@ def index_stats():
     """Return index statistics.
 
     Returns:
-        Dict with keys: total_files, total_pages, last_indexed, db_size_mb, subfolders.
+        Dict with keys: total_files, total_pages, last_indexed, db_size_mb,
+        subfolders, renderer.
 
     Raises:
         PdfSearchError: If no index exists.
@@ -479,6 +480,7 @@ def index_stats():
         "last_indexed": meta.get("last_indexed", "?"),
         "db_size_mb": f"{db_size:.1f}",
         "subfolders": subfolder_counts,
+        "renderer": "CoreGraphics" if _USE_COREGRAPHICS else "PyMuPDF",
     }
 
 

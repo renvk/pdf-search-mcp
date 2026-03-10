@@ -110,7 +110,7 @@ def read_page_image(filename: str, page: int, dpi: int = 150, subfolder: str = "
 
 @mcp.tool()
 def stats() -> str:
-    """Show PDF search index statistics (file count, page count, DB size)."""
+    """Show PDF search index statistics (file count, page count, DB size, renderer)."""
     try:
         info = index_stats()
     except PdfSearchError:
@@ -120,7 +120,8 @@ def stats() -> str:
         f"Files: {info['total_files']}, "
         f"Pages: {info['total_pages']}, "
         f"Last indexed: {info['last_indexed']}, "
-        f"DB size: {info['db_size_mb']} MB",
+        f"DB size: {info['db_size_mb']} MB, "
+        f"Renderer: {info['renderer']}",
     ]
     if info["subfolders"]:
         lines.append("Subfolders:")

@@ -205,6 +205,11 @@ class TestIndexStats:
         assert info["total_files"] == "3"
         assert info["total_pages"] == "4"
 
+    def test_renderer_field(self, indexed_db):
+        """Stats include active renderer name (CoreGraphics or PyMuPDF)."""
+        info = index_stats()
+        assert info["renderer"] in ("CoreGraphics", "PyMuPDF")
+
     def test_subfolder_breakdown(self, indexed_db):
         info = index_stats()
         assert "standards" in info["subfolders"]

@@ -13,6 +13,7 @@ authors = [{name = "ren", email = "ren@virku.ai"}]
 dependencies = [
     "PyMuPDF>=1.24.0",
     "mcp>=1.0.0",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

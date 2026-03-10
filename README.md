@@ -24,7 +24,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. On macOS, `pyobjc-framework-Quartz` is installed automatically for native CoreGraphics PDF rendering (sharper formula and math font output). On Linux/Windows, PyMuPDF is used as the renderer.
 
 ## Quick Start
 

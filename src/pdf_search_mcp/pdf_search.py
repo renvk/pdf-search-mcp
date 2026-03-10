@@ -427,21 +427,20 @@ def render_pdf_page(filename, page_num, dpi=150, subfolder=None):
         PdfSearchError: If file not found or page out of range.
     """
     filepath = _resolve_pdf_path(filename, subfolder)
-
-    # Validate page range — fitz is always available and avoids duplicating
-    # range-check logic across renderers
-    with fitz.open(str(filepath)) as doc:
-        if page_num < 1 or page_num > len(doc):
-            raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
-
     safe_name = re.sub(r'[^\w\-.]', '_', filename)
     out = Path(tempfile.gettempdir()) / f"pdf_page_{safe_name}_p{page_num}.png"
 
     if _USE_COREGRAPHICS:
+        # Validate with fitz (always available) before handing off to CG
+        with fitz.open(str(filepath)) as doc:
+            if page_num < 1 or page_num > len(doc):
+                raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
         png_bytes = render_page_coregraphics(str(filepath), page_num, dpi=dpi)
         out.write_bytes(png_bytes)
     else:
         with fitz.open(str(filepath)) as doc:
+            if page_num < 1 or page_num > len(doc):
+                raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
             pix = doc[page_num - 1].get_pixmap(dpi=dpi)
         pix.save(str(out))
 

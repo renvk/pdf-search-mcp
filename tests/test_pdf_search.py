@@ -87,8 +87,15 @@ class TestIndexPdfs:
         assert result["files_updated"] == 0
         assert result["files_deleted"] == 0
 
+    def test_recovers_pdf_dir_from_meta(self, indexed_db, monkeypatch):
+        """index_pdfs() with no arg and no env var recovers path from meta table."""
+        monkeypatch.delenv("PDF_SEARCH_DIR", raising=False)
+        result = index_pdfs()
+        assert result["total_files"] == 3
+        assert result["files_unchanged"] == 3
+
     def test_error_no_directory(self, temp_db, monkeypatch):
-        """Raise PdfSearchError when no directory specified and env var unset."""
+        """Raise PdfSearchError when no directory specified, no env var, no DB."""
         monkeypatch.delenv("PDF_SEARCH_DIR", raising=False)
         with pytest.raises(PdfSearchError, match="No PDF directory"):
             index_pdfs(None)

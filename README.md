@@ -65,7 +65,7 @@ Ask your AI agent to search your PDFs — it will use the `search`, `read_page`,
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `PDF_SEARCH_DIR` | *(none)* | Path to your PDF directory (required for indexing) |
+| `PDF_SEARCH_DIR` | *(none)* | Path to your PDF directory (required for first index, remembered after) |
 | `PDF_SEARCH_DB` | `~/.local/share/pdf-search-mcp/pdf_index.db` | Path to the SQLite database file |
 
 ## CLI Usage
@@ -73,8 +73,11 @@ Ask your AI agent to search your PDFs — it will use the `search`, `read_page`,
 The `pdf_search.py` module doubles as a CLI for indexing and direct search:
 
 ```bash
-# Build index
+# Build index (first time — PDF_SEARCH_DIR required)
 PDF_SEARCH_DIR=/path/to/pdfs python -m pdf_search_mcp.pdf_search index
+
+# Subsequent syncs (path remembered from first index)
+python -m pdf_search_mcp.pdf_search index
 
 # Search from command line
 python -m pdf_search_mcp.pdf_search search "query terms"
@@ -85,8 +88,8 @@ python -m pdf_search_mcp.pdf_search read filename.pdf 5
 # Show index statistics
 python -m pdf_search_mcp.pdf_search stats
 
-# Rebuild index from scratch
-PDF_SEARCH_DIR=/path/to/pdfs python -m pdf_search_mcp.pdf_search reindex
+# Rebuild index from scratch (path remembered)
+python -m pdf_search_mcp.pdf_search reindex
 ```
 
 ## Search Syntax

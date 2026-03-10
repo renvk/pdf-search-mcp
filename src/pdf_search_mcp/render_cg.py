@@ -13,13 +13,16 @@ from CoreFoundation import CFURLCreateWithFileSystemPath, kCFAllocatorDefault
 from Foundation import NSMutableData
 
 
-def render_page_coregraphics(pdf_path, page_num, dpi=150):
-    """Render a single PDF page to PNG bytes using CoreGraphics.
+def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
+    """Render a single PDF page (or region) to PNG bytes using CoreGraphics.
 
     Args:
         pdf_path: Absolute path to the PDF file (str).
         page_num: 1-based page number. CoreGraphics pages are 1-based natively.
         dpi: Resolution in dots per inch (default 150).
+        clip_rect: Optional (x, y, w, h) tuple in PDF points, CG bottom-left
+            origin. When set, bitmap is sized to this region and only content
+            within it is rendered. Caller handles coordinate conversion.
 
     Returns:
         PNG image as bytes. No file I/O — caller writes to disk if needed.
@@ -44,8 +47,14 @@ def render_page_coregraphics(pdf_path, page_num, dpi=150):
     # Media box defines the full page dimensions in points (1 pt = 1/72 in)
     media_box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFMediaBox)
     scale = dpi / 72.0
-    width = int(media_box.size.width * scale)
-    height = int(media_box.size.height * scale)
+
+    if clip_rect is not None:
+        cx, cy, cw, ch = clip_rect
+        width = int(cw * scale)
+        height = int(ch * scale)
+    else:
+        width = int(media_box.size.width * scale)
+        height = int(media_box.size.height * scale)
 
     # RGBA bitmap context — white background
     cs = Quartz.CGColorSpaceCreateDeviceRGB()
@@ -62,10 +71,18 @@ def render_page_coregraphics(pdf_path, page_num, dpi=150):
     Quartz.CGContextSetAllowsFontSmoothing(ctx, True)
     Quartz.CGContextSetShouldSmoothFonts(ctx, True)
 
-    # Scale and apply the page's drawing transform (handles /Rotate, CropBox)
+    # Scale to target DPI, then shift so the clip region (if any) fills the bitmap
     Quartz.CGContextScaleCTM(ctx, scale, scale)
+    if clip_rect is not None:
+        # Translate so the clip region's origin maps to bitmap (0, 0).
+        # After ScaleCTM the context operates in point space, so shifting by
+        # (-cx, -cy) moves the region's bottom-left corner to the origin.
+        # Content outside the bitmap bounds is clipped implicitly by CG.
+        Quartz.CGContextTranslateCTM(ctx, -cx, -cy)
+    # CropBox defines the visible content area (excludes bleed/trim marks).
+    # Falls back to MediaBox when no CropBox is defined in the PDF.
     transform = Quartz.CGPDFPageGetDrawingTransform(
-        page, Quartz.kCGPDFMediaBox, media_box, 0, True
+        page, Quartz.kCGPDFCropBox, media_box, 0, True
     )
     Quartz.CGContextConcatCTM(ctx, transform)
     Quartz.CGContextDrawPDFPage(ctx, page)

@@ -93,6 +93,47 @@ class TestReadPageImage:
         assert isinstance(result, str)
         assert "not found" in result.lower()
 
+    def test_default_dpi_is_140(self, indexed_db):
+        """Default DPI changed from 150 to 140 to match Claude's vision budget."""
+        with patch("pdf_search_mcp.mcp_server.render_pdf_page") as mock_render:
+            mock_render.return_value = "/tmp/test.png"
+            read_page_image("basics.pdf", 1)
+            assert mock_render.call_args.kwargs["dpi"] == 140
+
+    def test_region_returns_png_path(self, indexed_db):
+        """Cropped region render should return a valid PNG path."""
+        result = read_page_image("basics.pdf", 1, region=[0.0, 0.0, 0.5, 0.5])
+        assert result.endswith(".png")
+
+    def test_region_passed_to_render(self, indexed_db):
+        """Region parameter should be forwarded to render_pdf_page."""
+        with patch("pdf_search_mcp.mcp_server.render_pdf_page") as mock_render:
+            mock_render.return_value = "/tmp/test.png"
+            read_page_image("basics.pdf", 1, region=[0.1, 0.2, 0.8, 0.9])
+            assert mock_render.call_args.kwargs["region"] == [0.1, 0.2, 0.8, 0.9]
+
+    def test_region_none_by_default(self, indexed_db):
+        """Without region param, None should be passed to render_pdf_page."""
+        with patch("pdf_search_mcp.mcp_server.render_pdf_page") as mock_render:
+            mock_render.return_value = "/tmp/test.png"
+            read_page_image("basics.pdf", 1)
+            assert mock_render.call_args.kwargs["region"] is None
+
+    def test_region_validation_length(self, indexed_db):
+        """Region with wrong number of elements returns error string."""
+        result = read_page_image("basics.pdf", 1, region=[0.0, 0.0, 0.5])
+        assert "4 floats" in result
+
+    def test_region_validation_bounds(self, indexed_db):
+        """Region values outside 0.0–1.0 return error string."""
+        result = read_page_image("basics.pdf", 1, region=[0.0, 0.0, 0.5, 1.5])
+        assert "0.0 and 1.0" in result
+
+    def test_region_validation_ordering(self, indexed_db):
+        """x1 >= x2 or y1 >= y2 returns error string."""
+        result = read_page_image("basics.pdf", 1, region=[0.5, 0.0, 0.3, 1.0])
+        assert "x1 must be < x2" in result
+
 
 # --- stats ---
 

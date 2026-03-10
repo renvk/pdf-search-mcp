@@ -37,6 +37,11 @@ DB_PATH = Path(os.environ.get("PDF_SEARCH_DB", _DEFAULT_DB_DIR / "pdf_index.db")
 # FTS5 column index for 'content' in the pages table (file=0, subfolder=1, page=2, content=3)
 _CONTENT_COL = 3
 
+# Max pixel length for the rendered image's long edge. Auto-DPI targets this
+# value so region crops fill the vision model's resolution budget without
+# triggering downscaling. Default 1568 is tuned for Claude's vision pipeline.
+_MAX_RENDER_EDGE_PX = 1568
+
 
 class PdfSearchError(Exception):
     """Raised when a PDF search operation fails."""
@@ -408,17 +413,47 @@ def read_pdf_page(filename, page_num, subfolder=None):
         return doc[page_num - 1].get_text()
 
 
-def render_pdf_page(filename, page_num, dpi=150, subfolder=None):
-    """Render a PDF page as a PNG image.
+def _compute_region_dpi(page_width_pt, page_height_pt, region, dpi_cap):
+    """Compute DPI so the crop's long edge equals _MAX_RENDER_EDGE_PX.
+
+    Finds the DPI at which the region's longer dimension renders to exactly
+    _MAX_RENDER_EDGE_PX pixels, then caps at dpi_cap. This fills the vision
+    model's resolution budget without triggering downscaling.
+
+    Args:
+        page_width_pt: Page width in PDF points (1 pt = 1/72 inch).
+        page_height_pt: Page height in PDF points.
+        region: [x1, y1, x2, y2] fractional coordinates (0.0–1.0).
+        dpi_cap: Maximum DPI (from caller, already capped at _MAX_DPI).
+
+    Returns:
+        Effective DPI (int), capped at dpi_cap.
+    """
+    x1, y1, x2, y2 = region
+    crop_w_pt = (x2 - x1) * page_width_pt
+    crop_h_pt = (y2 - y1) * page_height_pt
+    long_edge_pt = max(crop_w_pt, crop_h_pt)
+    # pixels = points * dpi / 72  →  dpi = target_px * 72 / points
+    computed_dpi = int(_MAX_RENDER_EDGE_PX * 72.0 / long_edge_pt)
+    return min(computed_dpi, dpi_cap)
+
+
+def render_pdf_page(filename, page_num, dpi=140, subfolder=None, region=None):
+    """Render a PDF page (or region) as a PNG image.
 
     Useful for pages with formulas, diagrams, or tables that don't
-    extract well as text.
+    extract well as text. When region is set, DPI auto-scales to fill
+    the target vision resolution for the cropped area.
 
     Args:
         filename: PDF filename (e.g. 'EN_13445-3_2021.pdf').
         page_num: 1-based page number.
-        dpi: Resolution for rendering (default 150).
+        dpi: Resolution for rendering (default 140). Acts as a cap when
+            region is set and auto-DPI exceeds this value.
         subfolder: Optional subfolder to disambiguate duplicate filenames.
+        region: Optional [x1, y1, x2, y2] fractional crop box (0.0–1.0,
+            top-left origin). When set, only this region is rendered at
+            auto-calculated DPI.
 
     Returns:
         Path to the rendered PNG file.
@@ -428,20 +463,58 @@ def render_pdf_page(filename, page_num, dpi=150, subfolder=None):
     """
     filepath = _resolve_pdf_path(filename, subfolder)
     safe_name = re.sub(r'[^\w\-.]', '_', filename)
-    out = Path(tempfile.gettempdir()) / f"pdf_page_{safe_name}_p{page_num}.png"
+    if region is not None:
+        r_tag = "_r" + "_".join(f"{v:.2f}" for v in region)
+    else:
+        r_tag = ""
+    out = Path(tempfile.gettempdir()) / f"pdf_page_{safe_name}_p{page_num}{r_tag}.png"
 
     if _USE_COREGRAPHICS:
-        # Validate with fitz (always available) before handing off to CG
+        # Validate and get page dimensions with fitz before handing off to CG
         with fitz.open(str(filepath)) as doc:
             if page_num < 1 or page_num > len(doc):
                 raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
-        png_bytes = render_page_coregraphics(str(filepath), page_num, dpi=dpi)
+            page_rect = doc[page_num - 1].rect
+
+        effective_dpi = dpi
+        cg_clip = None
+        if region is not None:
+            effective_dpi = _compute_region_dpi(
+                page_rect.width, page_rect.height, region, dpi
+            )
+            x1, y1, x2, y2 = region
+            # Convert fractional top-left coords to CG bottom-left point coords
+            cg_clip = (
+                x1 * page_rect.width,
+                (1.0 - y2) * page_rect.height,
+                (x2 - x1) * page_rect.width,
+                (y2 - y1) * page_rect.height,
+            )
+
+        png_bytes = render_page_coregraphics(
+            str(filepath), page_num, dpi=effective_dpi, clip_rect=cg_clip
+        )
         out.write_bytes(png_bytes)
     else:
         with fitz.open(str(filepath)) as doc:
             if page_num < 1 or page_num > len(doc):
                 raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
-            pix = doc[page_num - 1].get_pixmap(dpi=dpi)
+            page = doc[page_num - 1]
+
+            if region is not None:
+                effective_dpi = _compute_region_dpi(
+                    page.rect.width, page.rect.height, region, dpi
+                )
+                x1, y1, x2, y2 = region
+                clip = fitz.Rect(
+                    x1 * page.rect.width,
+                    y1 * page.rect.height,
+                    x2 * page.rect.width,
+                    y2 * page.rect.height,
+                )
+                pix = page.get_pixmap(dpi=effective_dpi, clip=clip)
+            else:
+                pix = page.get_pixmap(dpi=dpi)
         pix.save(str(out))
 
     return out

@@ -82,28 +82,52 @@ def read_page(filename: str, page: int, subfolder: str = "") -> str:
 
 
 @mcp.tool()
-def read_page_image(filename: str, page: int, dpi: int = 150, subfolder: str = "") -> str:
-    """Render a PDF page as an image (PNG) for visual inspection.
+def read_page_image(
+    filename: str,
+    page: int,
+    dpi: int = 140,
+    region: list[float] | None = None,
+    subfolder: str = "",
+) -> str:
+    """Render a PDF page as a PNG image for visual inspection.
 
     Use this instead of read_page when the page contains formulas, diagrams,
     or tables that don't extract well as text. Returns a file path — use the
     Read tool on that path to view the rendered image.
 
-    For pages with mathematical formulas or equations, use dpi=300 or higher.
-    If formulas are still unreadable, retry at 450-600 dpi.
+    To zoom into a section (e.g. a formula), pass region=[x1, y1, x2, y2]
+    with each value 0.0–1.0 (top-left origin). DPI auto-scales to maximize
+    detail for the cropped area. Example: region=[0.0, 0.5, 1.0, 0.8] renders
+    the horizontal band from 50% to 80% down the page.
 
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        dpi: Render resolution (default 150, 300+ for formulas/equations, max 600).
-        subfolder: Subfolder as shown in search results (needed if duplicate filenames exist).
+        dpi: Max render resolution (default 140, capped at 600). Auto-scaled
+            when region is set.
+        region: Optional crop box [x1, y1, x2, y2] with 0.0–1.0 fractional
+            coords. (0,0) = top-left, (1,1) = bottom-right.
+        subfolder: Subfolder as shown in search results (needed if duplicate
+            filenames exist).
 
     Returns:
         Path to the rendered PNG file.
     """
     dpi = min(dpi, _MAX_DPI)
+    if region is not None:
+        if len(region) != 4:
+            return "region must be [x1, y1, x2, y2] (4 floats, each 0.0–1.0)."
+        if not all(0.0 <= v <= 1.0 for v in region):
+            return "region values must be between 0.0 and 1.0."
+        x1, y1, x2, y2 = region
+        if x1 >= x2 or y1 >= y2:
+            return "Invalid region: x1 must be < x2 and y1 must be < y2."
     try:
-        return str(render_pdf_page(filename, page, dpi=dpi, subfolder=subfolder or None))
+        return str(
+            render_pdf_page(
+                filename, page, dpi=dpi, subfolder=subfolder or None, region=region
+            )
+        )
     except PdfSearchError as e:
         return str(e)
 

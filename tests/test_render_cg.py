@@ -48,3 +48,32 @@ class TestRenderPageCoregraphics:
         make_pdf(pdf, "Single page.")
         with pytest.raises(ValueError, match="out of range"):
             render_page_coregraphics(str(pdf), 999)
+
+    def test_clip_returns_valid_png(self, make_pdf, tmp_path):
+        """Clip rect renders only a region — output is valid PNG."""
+        pdf = tmp_path / "cg_clip.pdf"
+        make_pdf(pdf, "Clip region test content.")
+        # Top-right quarter in CG coords (bottom-left origin):
+        # A4-ish page ≈ 612x792pt, clip = (306, 396, 306, 396)
+        data = render_page_coregraphics(
+            str(pdf), 1, dpi=150, clip_rect=(0, 0, 306, 396)
+        )
+        assert data[:8] == _PNG_MAGIC
+
+    def test_clip_produces_smaller_image(self, make_pdf, tmp_path):
+        """Clip output should be smaller than full-page at same DPI."""
+        pdf = tmp_path / "cg_clip_size.pdf"
+        make_pdf(pdf, "Size comparison for clip test.")
+        full = render_page_coregraphics(str(pdf), 1, dpi=150)
+        clip = render_page_coregraphics(
+            str(pdf), 1, dpi=150, clip_rect=(0, 0, 306, 396)
+        )
+        assert len(clip) < len(full)
+
+    def test_clip_none_renders_full_page(self, make_pdf, tmp_path):
+        """clip_rect=None must produce same output as no clip_rect."""
+        pdf = tmp_path / "cg_clip_none.pdf"
+        make_pdf(pdf, "Clip none test.")
+        data_default = render_page_coregraphics(str(pdf), 1, dpi=72)
+        data_none = render_page_coregraphics(str(pdf), 1, dpi=72, clip_rect=None)
+        assert data_default == data_none

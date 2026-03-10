@@ -18,6 +18,17 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+# Use CoreGraphics on macOS for sharper font rendering (especially math fonts).
+# Falls back to PyMuPDF's FreeType rasterizer when unavailable.
+_USE_COREGRAPHICS = False
+if sys.platform == "darwin":
+    try:
+        from .render_cg import render_page_coregraphics
+
+        _USE_COREGRAPHICS = True
+    except ImportError:
+        pass
+
 # Database location: configurable via PDF_SEARCH_DB env var,
 # defaults to ~/.local/share/pdf-search-mcp/pdf_index.db
 _DEFAULT_DB_DIR = Path.home() / ".local" / "share" / "pdf-search-mcp"
@@ -417,14 +428,23 @@ def render_pdf_page(filename, page_num, dpi=150, subfolder=None):
     """
     filepath = _resolve_pdf_path(filename, subfolder)
 
+    # Validate page range — fitz is always available and avoids duplicating
+    # range-check logic across renderers
     with fitz.open(str(filepath)) as doc:
         if page_num < 1 or page_num > len(doc):
             raise PdfSearchError(f"Page {page_num} out of range (1-{len(doc)}).")
-        pix = doc[page_num - 1].get_pixmap(dpi=dpi)
 
     safe_name = re.sub(r'[^\w\-.]', '_', filename)
     out = Path(tempfile.gettempdir()) / f"pdf_page_{safe_name}_p{page_num}.png"
-    pix.save(str(out))
+
+    if _USE_COREGRAPHICS:
+        png_bytes = render_page_coregraphics(str(filepath), page_num, dpi=dpi)
+        out.write_bytes(png_bytes)
+    else:
+        with fitz.open(str(filepath)) as doc:
+            pix = doc[page_num - 1].get_pixmap(dpi=dpi)
+        pix.save(str(out))
+
     return out
 
 

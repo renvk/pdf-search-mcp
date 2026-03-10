@@ -175,6 +175,22 @@ class TestRenderPdfPage:
         assert path.exists()
         assert str(path).endswith(".png")
 
+    def test_render_output_is_valid_png(self, indexed_db):
+        """Rendered file starts with PNG magic bytes regardless of renderer."""
+        path = render_pdf_page("basics.pdf", 1)
+        with open(path, "rb") as f:
+            magic = f.read(8)
+        assert magic == b"\x89PNG\r\n\x1a\n"
+
+    def test_pymupdf_fallback(self, indexed_db, monkeypatch):
+        """With CG disabled, PyMuPDF fallback still produces a valid PNG."""
+        import pdf_search_mcp.pdf_search as mod
+        monkeypatch.setattr(mod, "_USE_COREGRAPHICS", False)
+        path = render_pdf_page("basics.pdf", 1)
+        with open(path, "rb") as f:
+            magic = f.read(8)
+        assert magic == b"\x89PNG\r\n\x1a\n"
+
     def test_page_out_of_range(self, indexed_db):
         with pytest.raises(PdfSearchError, match="out of range"):
             render_pdf_page("basics.pdf", 999)

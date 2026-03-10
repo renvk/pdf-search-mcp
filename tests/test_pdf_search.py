@@ -209,6 +209,37 @@ class TestReindexPdfs:
         assert result["total_files"] == 3
         assert result["files_added"] == 3
 
+    def test_recovers_pdf_dir_from_meta(self, indexed_db, monkeypatch):
+        """Reindex with no pdf_dir arg and no env var recovers path from meta table.
+
+        Regression: previously reindex_pdfs deleted the DB first, losing the
+        stored pdf_dir and raising PdfSearchError.
+        """
+        monkeypatch.delenv("PDF_SEARCH_DIR", raising=False)
+        result = reindex_pdfs()
+        assert result["total_files"] == 3
+        assert result["files_added"] == 3
+
+    def test_db_deleted_on_reindex_failure(self, indexed_db, monkeypatch):
+        """If the stored pdf_dir points to a missing directory, the DB is still
+        deleted (reindex is destructive) and a clear error is raised.
+
+        Verifies the DB does not survive a failed reindex — no stale index.
+        """
+        db_path, _ = indexed_db
+        # Point stored pdf_dir at a nonexistent directory
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE meta SET value = '/nonexistent/path' WHERE key = 'pdf_dir'"
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.delenv("PDF_SEARCH_DIR", raising=False)
+        with pytest.raises(PdfSearchError):
+            reindex_pdfs()
+        assert not db_path.exists()
+
 
 # --- Incremental Indexing ---
 

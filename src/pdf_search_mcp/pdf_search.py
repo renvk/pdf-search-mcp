@@ -455,13 +455,32 @@ def index_stats():
 def reindex_pdfs(pdf_dir=None):
     """Drop and rebuild the index.
 
+    Reads the stored pdf_dir from the existing database before deleting it,
+    so the path survives even when neither pdf_dir nor PDF_SEARCH_DIR is set.
+
     Args:
-        pdf_dir: Path to PDF directory.
+        pdf_dir: Path to PDF directory. Falls back to PDF_SEARCH_DIR env var,
+            then to the pdf_dir stored in the existing index's meta table.
 
     Returns:
         Dict from index_pdfs(): files_added, files_updated, files_deleted,
         files_unchanged, total_files, total_pages, elapsed, errors.
+
+    Raises:
+        PdfSearchError: If no PDF directory can be determined.
     """
+    # Recover pdf_dir from the existing DB before destroying it
+    if pdf_dir is None and not os.environ.get("PDF_SEARCH_DIR") and DB_PATH.exists():
+        try:
+            with _get_db(readonly=True) as conn:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'pdf_dir'"
+                ).fetchone()
+                if row:
+                    pdf_dir = row["value"]
+        except Exception:
+            pass  # DB corrupt or missing meta table — let index_pdfs raise
+
     if DB_PATH.exists():
         DB_PATH.unlink()
     return index_pdfs(pdf_dir)
@@ -543,8 +562,6 @@ def _cli():
 
         elif cmd == "reindex":
             pdf_dir = sys.argv[2] if len(sys.argv) > 2 else None
-            if DB_PATH.exists():
-                print("Dropped existing index.")
             result = reindex_pdfs(pdf_dir)
             print(f"Indexed {result['total_files']} files, {result['total_pages']} pages in {result['elapsed']:.1f}s")
 

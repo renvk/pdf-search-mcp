@@ -89,26 +89,29 @@ def read_page_image(
     region: list[float] | None = None,
     subfolder: str = "",
 ) -> str:
-    """Render a PDF page as a PNG image for visual inspection.
+    """Render a PDF page (or cropped region) as a PNG for visual inspection.
 
-    Use this instead of read_page when the page contains formulas, diagrams,
-    or tables that don't extract well as text. Returns a file path — use the
-    Read tool on that path to view the rendered image.
+    Use instead of read_page() when text extraction misses formulas, diagrams,
+    or tables. Returns a file path — read it with the Read tool to view.
 
-    To zoom into a section (e.g. a formula), pass region=[x1, y1, x2, y2]
-    with each value 0.0–1.0 (top-left origin). DPI auto-scales to maximize
-    detail for the cropped area. Example: region=[0.0, 0.5, 1.0, 0.8] renders
-    the horizontal band from 50% to 80% down the page.
+    IMPORTANT — prefer region crops over full-page renders:
+    - When you need a specific formula, table, or diagram, pass region to
+      crop to just that area. DPI auto-scales to maximize detail, so do NOT
+      set dpi manually when using region.
+    - Do NOT raise dpi for full-page renders. The default (140) already
+      fills the vision model's input resolution. Higher DPI on a full page
+      produces an oversized image that gets downscaled, wasting the extra
+      resolution. Use region to zoom in instead.
 
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        dpi: Max render resolution (default 140, capped at 600). Auto-scaled
-            when region is set.
-        region: Optional crop box [x1, y1, x2, y2] with 0.0–1.0 fractional
-            coords. (0,0) = top-left, (1,1) = bottom-right.
-        subfolder: Subfolder as shown in search results (needed if duplicate
-            filenames exist).
+        dpi: Render resolution (default 140, capped at 600). Leave at
+            default for full-page renders. Auto-scaled when region is set.
+        region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
+            origin. Preferred when targeting specific content.
+            Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
+        subfolder: Subfolder as shown in search results.
 
     Returns:
         Path to the rendered PNG file.

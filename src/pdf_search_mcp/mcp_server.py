@@ -107,7 +107,8 @@ def read_page_image(
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
         dpi: Render resolution (default 140, capped at 600). Leave at
-            default for full-page renders. Auto-scaled when region is set.
+            default for full-page renders. Ignored when region is set
+            (auto-scaled to fill vision model resolution).
         region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
             origin. Preferred when targeting specific content.
             Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
@@ -125,6 +126,9 @@ def read_page_image(
         x1, y1, x2, y2 = region
         if x1 >= x2 or y1 >= y2:
             return "Invalid region: x1 must be < x2 and y1 must be < y2."
+        # Auto-DPI uses _MAX_DPI as ceiling so small regions scale up
+        # to fill the vision model's resolution budget automatically.
+        dpi = _MAX_DPI
     try:
         return str(
             render_pdf_page(

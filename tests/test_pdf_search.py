@@ -6,6 +6,8 @@ import pytest
 
 from pdf_search_mcp.pdf_search import (
     PdfSearchError,
+    _MAX_RENDER_EDGE_PX,
+    _compute_region_dpi,
     index_pdfs,
     index_stats,
     read_pdf_page,
@@ -194,6 +196,78 @@ class TestRenderPdfPage:
     def test_page_out_of_range(self, indexed_db):
         with pytest.raises(PdfSearchError, match="out of range"):
             render_pdf_page("basics.pdf", 999)
+
+    def test_region_returns_valid_png(self, indexed_db):
+        """Region crop produces a valid PNG file."""
+        path = render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 0.5, 0.5])
+        assert path.exists()
+        with open(path, "rb") as f:
+            assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+
+    def test_region_filename_includes_coords(self, indexed_db):
+        """Output filename includes region tag to avoid cache collisions."""
+        path = render_pdf_page("basics.pdf", 1, region=[0.1, 0.2, 0.8, 0.9])
+        assert "_r0.10_0.20_0.80_0.90" in str(path)
+
+    def test_region_with_pymupdf_fallback(self, indexed_db, monkeypatch):
+        """Region rendering works via PyMuPDF when CG is disabled."""
+        import pdf_search_mcp.pdf_search as mod
+        monkeypatch.setattr(mod, "_USE_COREGRAPHICS", False)
+        path = render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 1.0, 0.5])
+        with open(path, "rb") as f:
+            assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+
+    def test_region_none_renders_full_page(self, indexed_db):
+        """Explicit region=None behaves like no region (full page)."""
+        path = render_pdf_page("basics.pdf", 1, region=None)
+        assert path.exists()
+        assert "_r0" not in path.name
+
+
+# --- Compute Region DPI ---
+
+
+class TestComputeRegionDpi:
+    """Unit tests for _compute_region_dpi auto-scaling logic."""
+
+    def test_full_page_a4(self):
+        """Full-page region on A4 (595x842pt) → ~134 DPI."""
+        dpi = _compute_region_dpi(595, 842, [0, 0, 1, 1], 600)
+        # 1568 * 72 / 842 ≈ 134
+        assert dpi == 134
+
+    def test_half_page_height(self):
+        """Top half of A4 → long edge is width (595pt), ~189 DPI."""
+        dpi = _compute_region_dpi(595, 842, [0, 0, 1.0, 0.5], 600)
+        # crop is 595 x 421 pt, long edge 595, dpi = 1568*72/595 ≈ 189
+        assert dpi == 189
+
+    def test_quarter_page(self):
+        """Top-left quarter → long edge 421pt, ~267 DPI."""
+        dpi = _compute_region_dpi(595, 842, [0, 0, 0.5, 0.5], 600)
+        # crop is 297.5 x 421 pt, long edge 421, dpi = 1568*72/421 ≈ 268
+        assert dpi == 268
+
+    def test_capped_at_dpi_param(self):
+        """When computed DPI exceeds cap, use the cap."""
+        # Tiny region: 10% x 10% of A4 → long edge 84.2pt → ~1340 DPI
+        dpi = _compute_region_dpi(595, 842, [0, 0, 0.1, 0.1], 600)
+        assert dpi == 600
+
+    def test_capped_at_lower_custom_dpi(self):
+        """Caller-specified cap below computed DPI takes precedence."""
+        dpi = _compute_region_dpi(595, 842, [0, 0, 0.5, 0.5], 200)
+        assert dpi == 200
+
+    def test_output_below_target(self):
+        """Rendered long edge must not exceed _MAX_RENDER_EDGE_PX.
+
+        int() truncation ensures we stay at or below the threshold.
+        """
+        dpi = _compute_region_dpi(595, 842, [0, 0, 1, 1], 600)
+        long_edge_pt = 842
+        pixels = long_edge_pt * dpi / 72
+        assert pixels <= _MAX_RENDER_EDGE_PX
 
 
 # --- Stats ---

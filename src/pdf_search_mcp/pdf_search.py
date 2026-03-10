@@ -509,7 +509,7 @@ def _cli():
         print("  reindex [pdf_dir]         Drop and rebuild index")
         print()
         print("Environment variables:")
-        print("  PDF_SEARCH_DIR  Path to PDF directory (used by index/reindex)")
+        print("  PDF_SEARCH_DIR  Path to PDF directory (required for first index, remembered after)")
         print("  PDF_SEARCH_DB   Path to database file (default: ~/.local/share/pdf-search-mcp/pdf_index.db)")
         sys.exit(1)
 

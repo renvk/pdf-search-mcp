@@ -97,23 +97,23 @@ def read_page_image(
     Use instead of read_page() when text extraction misses formulas, diagrams,
     or tables. Returns a file path — read it with the Read tool to view.
 
-    IMPORTANT — prefer region crops over full-page renders:
-    - When you need a specific formula, table, or diagram, pass region to
-      crop to just that area. DPI auto-scales to maximize detail, so do NOT
-      set dpi manually when using region.
-    - Do NOT raise dpi for full-page renders. The default (140) already
-      fills the vision model's input resolution. Higher DPI on a full page
-      produces an oversized image that gets downscaled, wasting the extra
-      resolution. Use region to zoom in instead.
+    Workflow:
+    1. First call: render the full page (no region, default dpi) to see the
+       layout. Do NOT raise dpi — default 140 already fills the vision
+       model's 1568 px input limit. Higher DPI just gets downscaled.
+    2. Need more detail? Call again with region to crop a specific area.
+       DPI auto-scales to fill 1568 px for the crop — do NOT set dpi
+       manually, it is computed automatically.
 
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
         dpi: Render resolution (default 140, capped at 600). Leave at
             default for full-page renders. Ignored when region is set
-            (auto-scaled to fill vision model resolution).
+            (auto-scaled to fill 1568 px).
         region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
-            origin. Preferred when targeting specific content.
+            origin. Use after a full-page render to zoom into a specific
+            formula, table, or diagram.
             Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
         subfolder: Subfolder as shown in search results.
 

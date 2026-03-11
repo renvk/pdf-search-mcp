@@ -27,8 +27,8 @@ def search(query: str, limit: int = 10) -> str:
     Supports FTS5 syntax: phrases ("exact phrase"), AND (implicit),
     OR, NOT, prefix (term*), NEAR(term1 term2, 10).
 
-    Terms with dots, hyphens, or commas are auto-quoted (FTS5 treats them as
-    token separators). You can also quote them yourself: "13445-3", "v2.1".
+    Terms with dots, hyphens, commas, or slashes are auto-quoted (FTS5 treats
+    them as token separators). You can also quote them yourself: "13445-3", "v2.1".
 
     German ß↔ss variants are expanded automatically.
 

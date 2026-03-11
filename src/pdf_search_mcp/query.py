@@ -1,6 +1,6 @@
 """FTS5 query preparation pipeline.
 
-Handles sanitization (auto-quoting dots/hyphens/commas), German character
+Handles sanitization (auto-quoting dots/hyphens/commas/slashes), German character
 expansion (ß↔ss, ä↔ae, ö↔oe, ü↔ue), and NEAR() expression preservation.
 """
 

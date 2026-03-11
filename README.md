@@ -106,7 +106,7 @@ Uses [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
 | Prefix | `concur*` | Prefix matching |
 | NEAR | `NEAR(load balancer, 10)` | Terms within 10 tokens of each other |
 
-**Auto-quoting:** Terms containing dots, hyphens, or commas are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`) because FTS5 treats these as token separators.
+**Auto-quoting:** Terms containing dots, hyphens, commas, or slashes are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`) because FTS5 treats these as token separators.
 
 **German expansion:** Umlauts and eszett are automatically expanded to their digraph equivalents and vice versa (`ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue`). Searching for `Größe` also finds `Groesse`, and `Weißbuch` also finds `Weissbuch`.
 
@@ -144,7 +144,7 @@ png_path = render_pdf_page("document.pdf", 42, region=[0.0, 0.5, 1.0, 0.8])
 
 ## How It Works
 
-1. **Indexing** walks your PDF directory, extracts text from every page using PyMuPDF, and stores it in a SQLite FTS5 virtual table. Subdirectory names are preserved as a `subfolder` column for context.
+1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed. Subdirectory names are preserved as a `subfolder` column for context. Directories starting with `_` are skipped.
 
 2. **Searching** runs FTS5 MATCH queries with relevance ranking (`rank`) and returns snippets showing matching context.
 

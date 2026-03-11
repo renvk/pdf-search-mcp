@@ -15,6 +15,9 @@ from .query import prepare_query
 mcp = FastMCP("pdf-search-mcp")
 
 _MAX_DPI = 600
+# Region crops are clipped, so output stays bounded by _MAX_RENDER_EDGE_PX
+# (1568 px). Higher DPI just adds detail within that pixel budget.
+_MAX_REGION_DPI = 2500
 
 
 @mcp.tool()
@@ -89,26 +92,30 @@ def read_page_image(
     region: list[float] | None = None,
     subfolder: str = "",
 ) -> str:
-    """Render a PDF page as a PNG image for visual inspection.
+    """Render a PDF page (or cropped region) as a PNG for visual inspection.
 
-    Use this instead of read_page when the page contains formulas, diagrams,
-    or tables that don't extract well as text. Returns a file path — use the
-    Read tool on that path to view the rendered image.
+    Use instead of read_page() when text extraction misses formulas, diagrams,
+    or tables. Returns a file path — read it with the Read tool to view.
 
-    To zoom into a section (e.g. a formula), pass region=[x1, y1, x2, y2]
-    with each value 0.0–1.0 (top-left origin). DPI auto-scales to maximize
-    detail for the cropped area. Example: region=[0.0, 0.5, 1.0, 0.8] renders
-    the horizontal band from 50% to 80% down the page.
+    Workflow:
+    1. First call: render the full page (no region, default dpi) to see the
+       layout. Do NOT raise dpi — default 140 already fills the vision
+       model's 1568 px input limit. Higher DPI just gets downscaled.
+    2. Need more detail? Call again with region to crop a specific area.
+       DPI auto-scales to fill 1568 px for the crop — do NOT set dpi
+       manually, it is computed automatically.
 
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        dpi: Max render resolution (default 140, capped at 600). Auto-scaled
-            when region is set.
-        region: Optional crop box [x1, y1, x2, y2] with 0.0–1.0 fractional
-            coords. (0,0) = top-left, (1,1) = bottom-right.
-        subfolder: Subfolder as shown in search results (needed if duplicate
-            filenames exist).
+        dpi: Render resolution (default 140, capped at 600). Leave at
+            default for full-page renders. Ignored when region is set
+            (auto-scaled to fill 1568 px).
+        region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
+            origin. Use after a full-page render to zoom into a specific
+            formula, table, or diagram.
+            Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
+        subfolder: Subfolder as shown in search results.
 
     Returns:
         Path to the rendered PNG file.
@@ -122,6 +129,9 @@ def read_page_image(
         x1, y1, x2, y2 = region
         if x1 >= x2 or y1 >= y2:
             return "Invalid region: x1 must be < x2 and y1 must be < y2."
+        # Region output is clipped to _MAX_RENDER_EDGE_PX, so higher DPI
+        # only adds detail — no risk of oversized images.
+        dpi = _MAX_REGION_DPI
     try:
         return str(
             render_pdf_page(

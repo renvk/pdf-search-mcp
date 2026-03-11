@@ -15,6 +15,9 @@ from .query import prepare_query
 mcp = FastMCP("pdf-search-mcp")
 
 _MAX_DPI = 600
+# Region crops are clipped, so output stays bounded by _MAX_RENDER_EDGE_PX
+# (1568 px). Higher DPI just adds detail within that pixel budget.
+_MAX_REGION_DPI = 2500
 
 
 @mcp.tool()
@@ -126,9 +129,9 @@ def read_page_image(
         x1, y1, x2, y2 = region
         if x1 >= x2 or y1 >= y2:
             return "Invalid region: x1 must be < x2 and y1 must be < y2."
-        # Auto-DPI uses _MAX_DPI as ceiling so small regions scale up
-        # to fill the vision model's resolution budget automatically.
-        dpi = _MAX_DPI
+        # Region output is clipped to _MAX_RENDER_EDGE_PX, so higher DPI
+        # only adds detail — no risk of oversized images.
+        dpi = _MAX_REGION_DPI
     try:
         return str(
             render_pdf_page(

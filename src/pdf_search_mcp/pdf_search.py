@@ -37,10 +37,41 @@ DB_PATH = Path(os.environ.get("PDF_SEARCH_DB", _DEFAULT_DB_DIR / "pdf_index.db")
 # FTS5 column index for 'content' in the pages table (file=0, subfolder=1, page=2, content=3)
 _CONTENT_COL = 3
 
+# Weight for match density in combined ranking score. Density boosts
+# concentrated matches but cannot override BM25 relevance.
+_DENSITY_WEIGHT = 0.3
+
 # Max pixel length for the rendered image's long edge. Auto-DPI targets this
 # value so region crops fill the vision model's resolution budget without
 # triggering downscaling. Default 1568 is tuned for Claude's vision pipeline.
 _MAX_RENDER_EDGE_PX = 1568
+
+
+def _density_components(highlighted):
+    """Compute match density components from FTS5 highlighted text.
+
+    Args:
+        highlighted: Full page text with '>>>' / '<<<' around each matched
+            token (from FTS5 highlight()).
+
+    Returns:
+        (match_count, count_density, clustering) tuple.
+        - match_count: number of '>>>' markers.
+        - count_density: match_count / len(highlighted), or 0.0 if empty.
+        - clustering: how tightly grouped markers are (0.0–1.0). For 2+
+          matches: 1.0 - (span / text_length). For 0–1 matches: 0.5.
+    """
+    positions = [m.start() for m in re.finditer(">>>", highlighted)]
+    match_count = len(positions)
+    if not highlighted:
+        return (0, 0.0, 0.5)
+    count_density = match_count / len(highlighted)
+    if match_count >= 2:
+        span = positions[-1] - positions[0]
+        clustering = 1.0 - (span / len(highlighted))
+    else:
+        clustering = 0.5
+    return (match_count, count_density, clustering)
 
 
 class PdfSearchError(Exception):
@@ -327,15 +358,60 @@ def search_pdfs(query, limit=10):
         cursor = conn.execute(
             f"""
             SELECT file, subfolder, page,
-                   snippet(pages, {_CONTENT_COL}, '>>>', '<<<', '...', 40) AS snippet
+                   snippet(pages, {_CONTENT_COL}, '>>>', '<<<', '...', 40) AS snippet,
+                   highlight(pages, {_CONTENT_COL}, '>>>', '<<<') AS highlighted,
+                   rank
             FROM pages
             WHERE pages MATCH ?
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            (query, limit * 3),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = [dict(row) for row in cursor.fetchall()]
+
+    if not rows:
+        return []
+
+    # Compute density components for each row
+    for row in rows:
+        mc, cd, cl = _density_components(row["highlighted"])
+        row["_count_density"] = cd
+        row["_clustering"] = cl
+
+    # Normalize BM25 ranks to [0, 1] (most negative = best = 1.0)
+    ranks = [row["rank"] for row in rows]
+    min_rank, max_rank = min(ranks), max(ranks)
+    rank_span = max_rank - min_rank
+    for row in rows:
+        row["_bm25_norm"] = (
+            (max_rank - row["rank"]) / rank_span if rank_span else 1.0
+        )
+
+    # Normalize count_density to [0, 1]
+    densities = [row["_count_density"] for row in rows]
+    max_density = max(densities)
+    for row in rows:
+        row["_cd_norm"] = (
+            row["_count_density"] / max_density if max_density else 1.0
+        )
+
+    # Combined score: BM25 + weighted density blend
+    for row in rows:
+        density_blend = 0.5 * row["_cd_norm"] + 0.5 * row["_clustering"]
+        row["_score"] = row["_bm25_norm"] + _DENSITY_WEIGHT * density_blend
+
+    # Sort descending by combined score, truncate to requested limit
+    rows.sort(key=lambda r: r["_score"], reverse=True)
+    rows = rows[:limit]
+
+    # Strip internal keys before returning
+    for row in rows:
+        for key in ("highlighted", "rank", "_count_density", "_clustering",
+                     "_bm25_norm", "_cd_norm", "_score"):
+            row.pop(key, None)
+
+    return rows
 
 
 def _resolve_pdf_path(filename, subfolder=None):

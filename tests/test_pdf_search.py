@@ -8,6 +8,7 @@ from pdf_search_mcp.pdf_search import (
     PdfSearchError,
     _MAX_RENDER_EDGE_PX,
     _compute_region_dpi,
+    _density_components,
     index_pdfs,
     index_stats,
     read_pdf_page,
@@ -447,3 +448,71 @@ class TestIncrementalIndex:
         # Old content should still be searchable because savepoint rolled back
         hits = search_pdfs("pressure vessels")
         assert any(r["file"] == "basics.pdf" for r in hits)
+
+
+# --- Density Ranking ---
+
+
+class TestDensityRanking:
+    """Tests for _density_components() and density-aware re-ranking."""
+
+    def test_density_components_multiple_close(self):
+        """Markers clustered together yield high clustering."""
+        text = ">>>a<<< >>>b<<< >>>c<<< some filler text that goes on for a while"
+        mc, cd, cl = _density_components(text)
+        assert mc == 3
+        assert cd > 0
+        # all markers in the first ~30 chars of a ~65-char string → high clustering
+        assert cl > 0.6
+
+    def test_density_components_multiple_spread(self):
+        """Markers spread across the text yield low clustering."""
+        text = ">>>a<<<" + " " * 200 + ">>>b<<<" + " " * 200 + ">>>c<<<"
+        mc, cd, cl = _density_components(text)
+        assert mc == 3
+        # span covers nearly the entire string → low clustering
+        assert cl < 0.1
+
+    def test_density_components_single_match(self):
+        """One marker returns neutral clustering (0.5)."""
+        text = "some text with >>>one<<< match"
+        mc, cd, cl = _density_components(text)
+        assert mc == 1
+        assert cl == 0.5
+
+    def test_density_components_no_markers(self):
+        """No markers returns zeros for count/density, neutral clustering."""
+        text = "plain text with no matches"
+        mc, cd, cl = _density_components(text)
+        assert mc == 0
+        assert cd == 0.0
+        assert cl == 0.5
+
+    def test_dense_page_ranks_higher(self, temp_db, make_pdf, tmp_path):
+        """A page with dense term occurrences outranks a page with one mention.
+
+        Creates two PDFs: one with 'turbine' repeated densely in a short
+        paragraph, one with a single 'turbine' mention in longer text.
+        The dense page should rank first after density re-ranking.
+        """
+        pdf_dir = tmp_path / "density_pdfs"
+        pdf_dir.mkdir()
+
+        # Dense page: 'turbine' repeated many times in a short block
+        make_pdf(
+            pdf_dir / "dense.pdf",
+            "turbine turbine turbine turbine turbine design",
+        )
+        # Sparse page: one 'turbine' in longer text
+        make_pdf(
+            pdf_dir / "sparse_mention.pdf",
+            "This document covers many topics including a single mention of "
+            "turbine among other long paragraphs about unrelated subjects "
+            "that dilute the term frequency significantly in the overall text.",
+        )
+
+        index_pdfs(str(pdf_dir))
+        results = search_pdfs("turbine", limit=10)
+
+        assert len(results) >= 2
+        assert results[0]["file"] == "dense.pdf"

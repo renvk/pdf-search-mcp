@@ -146,7 +146,7 @@ png_path = render_pdf_page("document.pdf", 42, region=[0.0, 0.5, 1.0, 0.8])
 
 1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed. Subdirectory names are preserved as a `subfolder` column for context. Directories starting with `_` are skipped.
 
-2. **Searching** runs FTS5 MATCH queries with relevance ranking (`rank`) and returns snippets showing matching context.
+2. **Searching** runs FTS5 MATCH queries and re-ranks results by combining BM25 relevance with match density — pages where search terms cluster together score higher than pages with the same terms scattered throughout. The density signal blends term concentration (matches per character) and spatial clustering (how tightly grouped the matches are).
 
 3. **Reading** re-opens the original PDF file on disk (path resolved via the stored `pdf_dir` metadata) for full page text or image rendering. Region crops auto-scale DPI to fill a 1568 px long-edge budget, maximizing detail without producing oversized images.
 

@@ -1,7 +1,8 @@
 """FTS5 query preparation pipeline.
 
-Handles sanitization (auto-quoting dots/hyphens/commas/slashes), German character
-expansion (ß↔ss, ä↔ae, ö↔oe, ü↔ue), and NEAR() expression preservation.
+Handles apostrophe stripping, sanitization (auto-quoting dots/hyphens/commas/slashes),
+German character expansion (ß↔ss, ä↔ae, ö↔oe, ü↔ue), and NEAR() expression
+preservation.
 """
 
 import re
@@ -12,6 +13,14 @@ _FTS5_OPERATORS = frozenset({"AND", "OR", "NOT"})
 
 # Pattern matching NEAR(...) expressions — must be preserved verbatim
 _NEAR_RE = re.compile(r"NEAR\([^)]+\)", re.IGNORECASE)
+
+# Apostrophe-like characters that FTS5's query parser rejects but its unicode61
+# tokenizer silently strips during indexing.  Replacing with space aligns query
+# tokenization with index tokenization.
+_APOSTROPHES = str.maketrans({
+    "'": " ",       # U+0027 ASCII apostrophe
+    "\u2019": " ",  # U+2019 right single quotation mark (common in PDFs)
+})
 
 # German special character → digraph (forward direction, always unambiguous)
 _CHAR_TO_DIGRAPH = {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}
@@ -223,7 +232,11 @@ def _expand_german(query: str) -> str:
 
 
 def prepare_query(query: str) -> str:
-    """Full query preparation pipeline: preserve NEAR → sanitize → expand German chars."""
+    """Full query preparation pipeline.
+
+    Steps: strip apostrophes → preserve NEAR → sanitize → expand German chars.
+    """
+    query = query.translate(_APOSTROPHES)
     query, saved_nears = _preserve_near(query)
     query = _sanitize_query(query)
     query = _expand_german(query)

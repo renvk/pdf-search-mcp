@@ -251,3 +251,23 @@ class TestPrepareQuery:
     def test_fts5_operators_preserved(self):
         result = prepare_query("Größe OR pressure")
         assert " OR " in result
+
+    def test_apostrophe_stripped(self):
+        """Bare apostrophes cause FTS5 syntax errors — must be replaced with
+        spaces to match unicode61 tokenizer behavior during indexing."""
+        result = prepare_query("Young's modulus")
+        assert "'" not in result
+        assert "Young" in result
+        assert "modulus" in result
+
+    def test_unicode_right_quote_stripped(self):
+        """U+2019 right single quotation mark, common in PDFs."""
+        result = prepare_query("Young\u2019s modulus")
+        assert "\u2019" not in result
+        assert "Young" in result
+
+    def test_apostrophe_in_near(self):
+        """Apostrophes inside NEAR expressions must also be stripped."""
+        result = prepare_query("NEAR(Young's modulus, 5)")
+        assert "'" not in result
+        assert "NEAR" in result

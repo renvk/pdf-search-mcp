@@ -1,8 +1,8 @@
 """FTS5 query preparation pipeline.
 
 Handles apostrophe stripping, sanitization (auto-quoting dots/hyphens/commas/slashes),
-German character expansion (ß↔ss, ä↔ae, ö↔oe, ü↔ue), and NEAR() expression
-preservation.
+German digraph expansion (ß↔ss, ä↔ae, ö↔oe, ü↔ue), and NEAR() expression
+preservation.  Digraph variants are always expanded — no language detection heuristic.
 """
 
 import re
@@ -69,21 +69,6 @@ def _digraph_variants(word: str) -> list[str]:
                 variants.append(variant)
             start = pos + len(digraph)
     return variants
-
-
-def _has_german_content(text: str) -> bool:
-    """Check if text contains German chars or enough digraph evidence to suggest German.
-
-    Native German chars (ä, ö, ü, ß and uppercase) always indicate German content.
-    Digraphs (ae, oe, ue, ss) only trigger if at least two different types appear
-    in the query — a single type matches too many English words (e.g. 'pressure',
-    'true', 'assess').
-    """
-    if any(c in text for c in _GERMAN_CHARS):
-        return True
-    lower = text.lower()
-    types_found = sum(1 for d in ("ae", "oe", "ue", "ss") if d in lower)
-    return types_found >= 2
 
 
 def _token_variants(token: str) -> list[str]:
@@ -181,9 +166,6 @@ def _expand_german(query: str) -> str:
     so searching for 'Größe' misses pages containing 'Groesse' and vice versa.
     This rewrites each affected token as (variant1 OR variant2 [OR ...]).
     """
-    if not _has_german_content(query):
-        return query
-
     # Tokenize preserving quoted phrases (including trailing * for prefix search)
     parts = re.findall(r'"[^"]*"\*?|\S+', query)
     expanded = []

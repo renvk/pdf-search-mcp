@@ -4,7 +4,6 @@ from pdf_search_mcp.query import (
     _digraph_variants,
     _expand_german,
     _expand_near_german,
-    _has_german_content,
     _preserve_near,
     _restore_near,
     _sanitize_query,
@@ -59,27 +58,6 @@ class TestDigraphVariants:
     def test_no_digraphs(self):
         assert _digraph_variants("hello") == []
 
-
-# --- _has_german_content ---
-
-
-class TestHasGermanContent:
-    def test_native_chars(self):
-        assert _has_german_content("Größe") is True
-
-    def test_digraphs(self):
-        assert _has_german_content("Groesse") is True
-
-    def test_plain_english(self):
-        assert _has_german_content("pressure vessel") is False
-
-    def test_bug_21_assess_no_false_positive(self):
-        """'assess' has only one digraph type (ss) — not enough to trigger."""
-        assert _has_german_content("assess") is False
-
-    def test_bug_21_true_no_false_positive(self):
-        """'true' has only one digraph type (ue) — not enough to trigger."""
-        assert _has_german_content("true") is False
 
 
 # --- _token_variants ---
@@ -211,8 +189,16 @@ class TestExpandGerman:
         assert '"Groesse"' in result
         assert "OR" in result
 
-    def test_no_german_content(self):
-        assert _expand_german("pressure vessel") == "pressure vessel"
+    def test_english_words_with_digraphs_expanded(self):
+        """With always-expand, English words containing digraph substrings (ss, ue)
+        get German variants even though they are not German words."""
+        result = _expand_german("pressure vessel")
+        # "pressure" contains 'ss' and 'ue', "vessel" contains 'ss'
+        assert "OR" in result
+
+    def test_plain_english_without_digraphs(self):
+        """Words with no digraph substrings pass through unchanged."""
+        assert _expand_german("bolt flange") == "bolt flange"
 
     def test_near_placeholder_skipped(self):
         result = _expand_german("__NEAR0__ Größe")
@@ -231,8 +217,14 @@ class TestExpandGerman:
 
 
 class TestPrepareQuery:
-    def test_plain_text_passthrough(self):
-        assert prepare_query("pressure vessel") == "pressure vessel"
+    def test_plain_text_without_digraphs(self):
+        """Words with no digraph substrings pass through unchanged."""
+        assert prepare_query("bolt flange") == "bolt flange"
+
+    def test_english_words_with_digraphs_expanded(self):
+        """English words containing digraph substrings now get expanded."""
+        result = prepare_query("pressure vessel")
+        assert "OR" in result
 
     def test_hyphenated_and_german(self):
         result = prepare_query("EN-13445 Größe")

@@ -4,6 +4,7 @@
 Wraps the pdf_search module for use by MCP clients.
 """
 
+import re
 import sqlite3
 import sys
 
@@ -19,6 +20,109 @@ _MAX_DPI = 600
 # (1568 px). Higher DPI just adds detail within that pixel budget.
 _MAX_REGION_DPI = 2500
 
+# FTS5 boolean operators — case-sensitive (FTS5 requires uppercase)
+_FTS5_OPERATORS = frozenset({"AND", "OR", "NOT"})
+
+# Detect NEAR() expressions to skip relaxation on structured queries
+_NEAR_PAT = re.compile(r"NEAR\s*\(", re.IGNORECASE)
+
+
+def _extract_terms(query):
+    """Split a raw query into droppable terms for relaxation.
+
+    Quoted phrases are kept as single terms (including quotes).
+    Returns None if the query contains explicit FTS5 operators (AND, OR,
+    NOT) or NEAR() expressions — structured queries should not be relaxed.
+
+    Args:
+        query: Raw query string (before prepare_query).
+
+    Returns:
+        List of term strings, or None if relaxation should be skipped.
+    """
+    if _NEAR_PAT.search(query):
+        return None
+    tokens = re.findall(r'"[^"]*"\*?|\S+', query)
+    if any(t in _FTS5_OPERATORS for t in tokens):
+        return None
+    return tokens or None
+
+
+def _try_search(query, limit):
+    """Prepare and execute a search with FTS5 error recovery.
+
+    Runs the query through prepare_query → search_pdfs.  If the prepared
+    form triggers an FTS5 syntax error, retries with the raw query.
+
+    Args:
+        query: Raw query string.
+        limit: Maximum number of results.
+
+    Returns:
+        List of result dicts, or empty list on no match / syntax error.
+    """
+    prepared = prepare_query(query)
+    try:
+        return search_pdfs(prepared, limit)
+    except sqlite3.OperationalError as e:
+        if "fts5" in str(e).lower():
+            try:
+                return search_pdfs(query, limit)
+            except sqlite3.OperationalError:
+                return []
+        raise
+
+
+def _format_results(results):
+    """Format result dicts as a numbered list with snippets."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(
+            f"[{i}] {r['subfolder']}/{r['file']} p.{r['page']}\n    {r['snippet']}"
+        )
+    return "\n\n".join(lines)
+
+
+def _relax_search(terms, limit):
+    """Progressively relax a multi-term AND query until results appear.
+
+    Phase 1 (3+ terms): try dropping each term individually, keep the
+    variant that returns the most results.  The dropped term is the one
+    least represented in the corpus.
+
+    Phase 2: OR all original terms.  BM25 ranking naturally prioritises
+    pages matching more terms.
+
+    Args:
+        terms: List of query terms (from _extract_terms).
+        limit: Maximum number of results.
+
+    Returns:
+        (results, note) tuple.  results is a list of dicts, note is a
+        human-readable string explaining what was actually searched.
+        Both empty when no relaxation produced results.
+    """
+    # Phase 1: single-term drops
+    if len(terms) >= 3:
+        best = []
+        best_idx = -1
+        for i in range(len(terms)):
+            subset = terms[:i] + terms[i + 1:]
+            results = _try_search(" ".join(subset), limit)
+            if len(results) > len(best):
+                best = results
+                best_idx = i
+        if best:
+            kept = terms[:best_idx] + terms[best_idx + 1:]
+            return best, f"No matches for full query. Relaxed to: {' '.join(kept)}"
+
+    # Phase 2: OR all terms
+    results = _try_search(" OR ".join(terms), limit)
+    if results:
+        return results, "No matches for full query. Showing pages matching any term."
+
+    return [], ""
+
 
 @mcp.tool()
 def search(query: str, limit: int = 10) -> str:
@@ -32,6 +136,10 @@ def search(query: str, limit: int = 10) -> str:
 
     German ß↔ss variants are expanded automatically.
 
+    When no results match all terms (implicit AND), the query is
+    automatically relaxed: first by dropping one term at a time, then
+    by OR-ing all terms.  A note at the top explains what was searched.
+
     Args:
         query: FTS5 search query string.
         limit: Maximum number of results (default 10).
@@ -39,25 +147,18 @@ def search(query: str, limit: int = 10) -> str:
     Returns:
         Formatted search results with file, subfolder, page, and snippet.
     """
-    prepared = prepare_query(query)
-    try:
-        results = search_pdfs(prepared, limit)
-    except sqlite3.OperationalError as e:
-        if "fts5" in str(e).lower():
-            # Fallback: if prepared query has invalid FTS5 syntax,
-            # attempt raw query as last resort
-            results = search_pdfs(query, limit)
-        else:
-            raise
-    if not results:
-        return "No results found."
+    results = _try_search(query, limit)
+    if results:
+        return _format_results(results)
 
-    lines = []
-    for i, r in enumerate(results, 1):
-        lines.append(
-            f"[{i}] {r['subfolder']}/{r['file']} p.{r['page']}\n    {r['snippet']}"
-        )
-    return "\n\n".join(lines)
+    # Relax multi-term queries that have no explicit operators
+    terms = _extract_terms(query)
+    if terms and len(terms) >= 2:
+        relaxed, note = _relax_search(terms, limit)
+        if relaxed:
+            return note + "\n\n" + _format_results(relaxed)
+
+    return "No results found."
 
 
 @mcp.tool()

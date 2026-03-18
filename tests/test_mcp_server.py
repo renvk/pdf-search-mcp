@@ -5,7 +5,15 @@ from unittest.mock import patch
 
 import pytest
 
-from pdf_search_mcp.mcp_server import read_page, read_page_image, search, stats
+from pdf_search_mcp.mcp_server import (
+    _extract_terms,
+    _relax_search,
+    _try_search,
+    read_page,
+    read_page_image,
+    search,
+    stats,
+)
 from pdf_search_mcp.pdf_search import PdfSearchError
 
 
@@ -20,6 +28,7 @@ class TestSearch:
         assert "p." in result
 
     def test_no_results(self, indexed_db):
+        """Single nonexistent term — no relaxation possible."""
         result = search("xyznonexistent")
         assert result == "No results found."
 
@@ -39,6 +48,119 @@ class TestSearch:
             result = search("pressure")
         # Should have fallen back and returned results
         assert call_count == 2
+
+
+# --- query relaxation ---
+
+
+class TestExtractTerms:
+    """Unit tests for _extract_terms — decides whether relaxation applies."""
+
+    def test_simple_terms(self):
+        assert _extract_terms("pressure vessels piping") == ["pressure", "vessels", "piping"]
+
+    def test_quoted_phrase_kept_whole(self):
+        """A quoted phrase counts as one droppable term."""
+        assert _extract_terms('"AD 2000" Merkblatt') == ['"AD 2000"', "Merkblatt"]
+
+    def test_prefix_with_quotes(self):
+        """Quoted prefix search preserved as single term."""
+        assert _extract_terms('"EN-13445"* design') == ['"EN-13445"*', "design"]
+
+    def test_returns_none_for_and(self):
+        """Explicit AND means the user structured the query — don't relax."""
+        assert _extract_terms("pressure AND vessels") is None
+
+    def test_returns_none_for_or(self):
+        assert _extract_terms("pressure OR vessels") is None
+
+    def test_returns_none_for_not(self):
+        assert _extract_terms("pressure NOT vessels") is None
+
+    def test_returns_none_for_near(self):
+        assert _extract_terms("NEAR(pressure vessels, 5)") is None
+
+    def test_returns_none_for_empty(self):
+        assert _extract_terms("") is None
+
+    def test_single_term(self):
+        assert _extract_terms("pressure") == ["pressure"]
+
+    def test_case_sensitive_operators(self):
+        """Lowercase 'and' is a regular word in FTS5, not an operator."""
+        assert _extract_terms("rock and roll") == ["rock", "and", "roll"]
+
+
+class TestRelaxSearch:
+    """Integration tests for _relax_search against the sample index."""
+
+    def test_drops_nonexistent_term(self, indexed_db):
+        """'pressure xyznonexistent bogus' — Phase 1 drops one bad term at a time,
+        finds that dropping the right term yields the most results."""
+        # 'pressure' exists in the index; 'xyznonexistent' and 'bogus' don't.
+        # With 3 terms, Phase 1 tries all single drops.  Dropping either
+        # nonexistent term still leaves one nonexistent term (AND fails).
+        # Phase 2 (OR) should catch it — 'pressure' alone matches.
+        results, note = _relax_search(["pressure", "xyznonexistent", "bogus"], 10)
+        assert results
+        assert "any term" in note or "Relaxed to" in note
+
+    def test_phase1_finds_best_drop(self, indexed_db):
+        """'pressure vessels xyznonexistent' — dropping the nonexistent term
+        leaves 'pressure vessels' which matches page 1 of basics.pdf."""
+        results, note = _relax_search(["pressure", "vessels", "xyznonexistent"], 10)
+        assert results
+        assert "Relaxed to" in note
+        assert "xyznonexistent" not in note  # dropped term excluded from note
+
+    def test_two_terms_skips_phase1(self, indexed_db):
+        """With 2 terms, Phase 1 is skipped and Phase 2 (OR) runs directly."""
+        results, note = _relax_search(["pressure", "xyznonexistent"], 10)
+        assert results
+        assert "any term" in note
+
+    def test_all_terms_missing(self, indexed_db):
+        """All terms absent from corpus — both phases return nothing."""
+        results, note = _relax_search(["qqq", "zzz", "xxx"], 10)
+        assert results == []
+        assert note == ""
+
+    def test_relaxation_preserves_query_pipeline(self, indexed_db):
+        """Sub-queries still go through prepare_query (sanitization, German
+        expansion).  'Größe' should match via ß→ss expansion even inside
+        a relaxed sub-query."""
+        # 'Größe' exists in basics.pdf page 2; 'xyznonexistent' forces relaxation
+        results, note = _relax_search(["Größe", "xyznonexistent"], 10)
+        assert results
+        assert any("basics.pdf" in r["file"] for r in results)
+
+
+class TestSearchRelaxation:
+    """End-to-end tests verifying relaxation through the search() tool."""
+
+    def test_direct_match_no_relaxation(self, indexed_db):
+        """When all terms match, no relaxation note appears."""
+        result = search("pressure vessels")
+        assert "[1]" in result
+        assert "Relaxed" not in result
+        assert "any term" not in result
+
+    def test_relaxation_note_in_output(self, indexed_db):
+        """When relaxation triggers, the note precedes the results."""
+        result = search("pressure vessels xyznonexistent")
+        assert "[1]" in result
+        assert "No matches for full query" in result
+
+    def test_no_relaxation_for_operators(self, indexed_db):
+        """Queries with explicit AND/OR/NOT bypass relaxation entirely."""
+        result = search("xyznonexistent AND pressure")
+        # Should get no results (AND requires both), no relaxation attempted
+        assert result == "No results found."
+
+    def test_two_bad_terms_no_results(self, indexed_db):
+        """All terms nonexistent — relaxation tried but still no results."""
+        result = search("qqq zzz")
+        assert result == "No results found."
 
 
 # --- read_page ---

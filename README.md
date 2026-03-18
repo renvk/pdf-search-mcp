@@ -110,6 +110,8 @@ Uses [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
 
 **German expansion:** Umlauts and eszett are automatically expanded to their digraph equivalents and vice versa (`ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue`). Searching for `Größe` also finds `Groesse`, and `Weißbuch` also finds `Weissbuch`.
 
+**Auto-relaxation:** When a multi-term query returns no results (all terms must appear on the same page), the search automatically relaxes: first by dropping one term at a time to find the term blocking results, then by OR-ing all terms. A note in the output explains what was actually searched. Queries with explicit operators (AND, OR, NOT, NEAR) are not relaxed.
+
 ## MCP Tools
 
 | Tool | Parameters | Description |

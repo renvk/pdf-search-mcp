@@ -168,7 +168,8 @@ def read_page(filename: str, page: int, subfolder: str = "") -> str:
     Use after search() to read the complete page content around a match.
     If the result contains garbled text, broken symbols, or unreadable
     formulas, use read_page_image() instead — it renders the page as a
-    PNG that preserves formulas, diagrams, and tables exactly.
+    PNG that preserves formulas, diagrams, and tables exactly. For tables
+    and dense data, crop to the relevant region to read values reliably.
 
     Args:
         filename: PDF filename exactly as shown in search results.
@@ -199,12 +200,13 @@ def read_page_image(
     or tables. Returns a file path — read it with the Read tool to view.
 
     Workflow:
-    1. First call: render the full page (no region, default dpi) to see the
-       layout. Do NOT raise dpi — default 140 already fills the vision
+    1. First call: render the full page (no region, default dpi) to orient
+       yourself. Do NOT raise dpi — default 140 already fills the vision
        model's 1568 px input limit. Higher DPI just gets downscaled.
-    2. Need more detail? Call again with region to crop a specific area.
-       DPI auto-scales to fill 1568 px for the crop — do NOT set dpi
-       manually, it is computed automatically.
+    2. ALWAYS crop before reading values. Tables, formulas, and dense data
+       are NOT reliably readable at full-page scale. Call again with region
+       to crop the area of interest. DPI auto-scales to fill 1568 px for
+       the crop — do NOT set dpi manually, it is computed automatically.
 
     Args:
         filename: PDF filename exactly as shown in search results.
@@ -213,8 +215,8 @@ def read_page_image(
             default for full-page renders. Ignored when region is set
             (auto-scaled to fill 1568 px).
         region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
-            origin. Use after a full-page render to zoom into a specific
-            formula, table, or diagram.
+            origin. Required for reading values from tables, formulas, or
+            figures — full-page scale is not reliable for these.
             Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
         subfolder: Subfolder as shown in search results.
 
@@ -234,13 +236,19 @@ def read_page_image(
         # only adds detail — no risk of oversized images.
         dpi = _MAX_REGION_DPI
     try:
-        return str(
+        path = str(
             render_pdf_page(
                 filename, page, dpi=dpi, subfolder=subfolder or None, region=region
             )
         )
     except PdfSearchError as e:
         return str(e)
+    if region is None:
+        path += (
+            "\nCrop to tables/figures with region before reading values"
+            " (e.g. region=[0.0, 0.3, 1.0, 0.7] for a mid-page table)."
+        )
+    return path
 
 
 @mcp.tool()

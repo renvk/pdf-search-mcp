@@ -189,7 +189,9 @@ class TestReadPage:
 class TestReadPageImage:
     def test_returns_png_path(self, indexed_db):
         result = read_page_image("basics.pdf", 1)
-        assert result.endswith(".png")
+        # Full-page renders append a crop hint after the path
+        first_line = result.split("\n")[0]
+        assert first_line.endswith(".png")
 
     def test_dpi_capped_at_max(self, indexed_db):
         """DPI values above _MAX_DPI (600) should be clamped."""

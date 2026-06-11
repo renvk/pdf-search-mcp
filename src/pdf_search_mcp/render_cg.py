@@ -4,6 +4,11 @@ Uses Apple's native CoreGraphics/CoreText pipeline for sub-pixel font
 rendering. Produces sharper glyphs than PyMuPDF's FreeType rasterizer,
 especially for math fonts (CambriaMath, Computer Modern, STIX).
 
+Geometry invariant: the bitmap is sized from the rotation-applied CropBox,
+matching PyMuPDF's page.rect — callers compute clip rectangles from
+page.rect and both renderers must agree on the coordinate space, or
+region crops land on the wrong content.
+
 Requires pyobjc-framework-Quartz (auto-installed on macOS via pyproject.toml
 platform marker). Import will fail on non-macOS — caller must catch ImportError.
 """
@@ -19,17 +24,19 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
     Args:
         pdf_path: Absolute path to the PDF file (str).
         page_num: 1-based page number. CoreGraphics pages are 1-based natively.
-        dpi: Resolution in dots per inch (default 150).
+        dpi: Resolution in dots per inch (default 140, must be >= 1).
         clip_rect: Optional (x, y, w, h) tuple in PDF points, CG bottom-left
-            origin. When set, bitmap is sized to this region and only content
-            within it is rendered. Caller handles coordinate conversion.
+            origin, in the rotation-applied CropBox coordinate space (same
+            space as PyMuPDF's page.rect). When set, bitmap is sized to this
+            region and only content within it is rendered.
 
     Returns:
         PNG image as bytes. No file I/O — caller writes to disk if needed.
 
     Raises:
-        ValueError: If the PDF cannot be opened (bad path) or page_num is
-            out of range.
+        ValueError: If the PDF cannot be opened, page_num is out of range,
+            the bitmap context cannot be created (zero/negative size), or
+            PNG encoding fails.
     """
     url = CFURLCreateWithFileSystemPath(
         kCFAllocatorDefault, pdf_path, Quartz.kCFURLPOSIXPathStyle, False
@@ -44,8 +51,16 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
             f"Page {page_num} out of range for {pdf_path}"
         )
 
-    # Media box defines the full page dimensions in points (1 pt = 1/72 in)
-    media_box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFMediaBox)
+    # CropBox defines the visible content area (excludes bleed/trim marks);
+    # CGPDFPageGetBoxRect falls back to MediaBox when no CropBox is defined.
+    # Apply /Rotate so dimensions match PyMuPDF's page.rect, which callers
+    # use to compute clip rectangles.
+    crop_box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFCropBox)
+    rotation = Quartz.CGPDFPageGetRotationAngle(page) % 360
+    page_w, page_h = crop_box.size.width, crop_box.size.height
+    if rotation in (90, 270):
+        page_w, page_h = page_h, page_w
+
     scale = dpi / 72.0
 
     if clip_rect is not None:
@@ -53,8 +68,10 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
         width = int(cw * scale)
         height = int(ch * scale)
     else:
-        width = int(media_box.size.width * scale)
-        height = int(media_box.size.height * scale)
+        width = int(page_w * scale)
+        height = int(page_h * scale)
+    if width < 1 or height < 1:
+        raise ValueError(f"Render size {width}x{height} px is invalid (dpi={dpi}).")
 
     # RGBA bitmap context — white background
     cs = Quartz.CGColorSpaceCreateDeviceRGB()
@@ -62,6 +79,8 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
         None, width, height, 8, width * 4, cs,
         Quartz.kCGImageAlphaPremultipliedLast,
     )
+    if ctx is None:
+        raise ValueError(f"Cannot create {width}x{height} px bitmap context.")
 
     # White fill (PDF pages have transparent background by default)
     Quartz.CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 1.0)
@@ -79,16 +98,21 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
         # (-cx, -cy) moves the region's bottom-left corner to the origin.
         # Content outside the bitmap bounds is clipped implicitly by CG.
         Quartz.CGContextTranslateCTM(ctx, -cx, -cy)
-    # CropBox defines the visible content area (excludes bleed/trim marks).
-    # Falls back to MediaBox when no CropBox is defined in the PDF.
+    # Map the CropBox (with /Rotate applied) onto a rect of exactly its own
+    # rotated size at the origin — content fills the bitmap edge to edge.
+    # Sizing the target rect from any other box (e.g. MediaBox) letterboxes
+    # the content and shifts clip coordinates off their targets.
+    target = Quartz.CGRectMake(0, 0, page_w, page_h)
     transform = Quartz.CGPDFPageGetDrawingTransform(
-        page, Quartz.kCGPDFCropBox, media_box, 0, True
+        page, Quartz.kCGPDFCropBox, target, 0, True
     )
     Quartz.CGContextConcatCTM(ctx, transform)
     Quartz.CGContextDrawPDFPage(ctx, page)
 
     # Extract CGImage from the bitmap context
     cg_image = Quartz.CGBitmapContextCreateImage(ctx)
+    if cg_image is None:
+        raise ValueError("Failed to extract image from bitmap context.")
 
     # Encode to PNG in memory via CGImageDestination + NSMutableData
     png_data = NSMutableData.data()
@@ -96,6 +120,7 @@ def render_page_coregraphics(pdf_path, page_num, dpi=140, clip_rect=None):
         png_data, "public.png", 1, None
     )
     Quartz.CGImageDestinationAddImage(dest, cg_image, None)
-    Quartz.CGImageDestinationFinalize(dest)
+    if not Quartz.CGImageDestinationFinalize(dest) or not len(png_data):
+        raise ValueError("PNG encoding failed.")
 
     return bytes(png_data)

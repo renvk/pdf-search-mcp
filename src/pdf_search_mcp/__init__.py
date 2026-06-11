@@ -8,12 +8,16 @@ from .pdf_search import (
     reindex_pdfs,
     render_pdf_page,
     search_pdfs,
+    search_with_relaxation,
 )
+from .query import prepare_query
 
 __all__ = [
     "PdfSearchError",
     "index_pdfs",
     "search_pdfs",
+    "search_with_relaxation",
+    "prepare_query",
     "read_pdf_page",
     "render_pdf_page",
     "index_stats",

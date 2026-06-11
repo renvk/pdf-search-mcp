@@ -7,7 +7,11 @@ loop stays responsive); tests drive them with asyncio.run().
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from pdf_search_mcp.mcp_server import (
+    _parse_args,
+    main,
     read_page,
     read_page_image,
     search,
@@ -213,6 +217,75 @@ class TestReadPageImage:
         """x1 >= x2 or y1 >= y2 returns error string."""
         result = run(read_page_image("basics.pdf", 1, region=[0.5, 0.0, 0.3, 1.0]))
         assert "x1 must be < x2" in result
+
+
+# --- transport selection ---
+
+
+class TestParseArgs:
+    def test_no_args_defaults_to_stdio(self):
+        """Existing installs invoke `pdf-search-mcp` with no arguments —
+        the default must stay stdio or every current MCP client config
+        would break on upgrade."""
+        args = _parse_args([])
+        assert args.transport == "stdio"
+
+    def test_http_defaults_to_loopback(self):
+        """The HTTP transport has no authentication, so the default bind
+        must be 127.0.0.1 — exposing it beyond the local machine has to
+        be an explicit --host choice."""
+        args = _parse_args(["--transport", "http"])
+        assert args.host == "127.0.0.1"
+        assert args.port == 8000
+
+    def test_http_flags_parsed(self):
+        args = _parse_args(
+            ["--transport", "http", "--host", "0.0.0.0", "--port", "9000"]
+        )
+        assert args.transport == "http"
+        assert args.host == "0.0.0.0"
+        assert args.port == 9000
+
+    def test_unknown_transport_rejected(self):
+        """'sse' is a real FastMCP transport but deliberately not exposed
+        (deprecated in the MCP spec in favor of streamable HTTP)."""
+        with pytest.raises(SystemExit):
+            _parse_args(["--transport", "sse"])
+
+    def test_port_out_of_range_rejected(self):
+        """argparse type=int accepts 70000; without the explicit range
+        check it would only fail later as an OS-level bind error."""
+        with pytest.raises(SystemExit):
+            _parse_args(["--port", "70000"])
+        with pytest.raises(SystemExit):
+            _parse_args(["--port", "0"])
+
+
+class TestMainTransportDispatch:
+    def test_default_runs_stdio(self):
+        """No arguments must reach mcp.run() without a transport override
+        (FastMCP's own default is stdio)."""
+        with patch("pdf_search_mcp.mcp_server.mcp") as mock_mcp:
+            with patch("sys.argv", ["pdf-search-mcp"]):
+                main()
+            mock_mcp.run.assert_called_once_with()
+
+    def test_http_sets_bind_address_and_transport(self):
+        """--host/--port must land in mcp.settings BEFORE run() — FastMCP
+        reads the bind address from settings, not from run() arguments,
+        so passing them any other way is silently ignored."""
+        with patch("pdf_search_mcp.mcp_server.mcp") as mock_mcp:
+            argv = [
+                "pdf-search-mcp",
+                "--transport", "http",
+                "--host", "0.0.0.0",
+                "--port", "9000",
+            ]
+            with patch("sys.argv", argv):
+                main()
+            assert mock_mcp.settings.host == "0.0.0.0"
+            assert mock_mcp.settings.port == 9000
+            mock_mcp.run.assert_called_once_with(transport="streamable-http")
 
 
 # --- stats ---

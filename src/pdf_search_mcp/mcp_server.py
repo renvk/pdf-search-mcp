@@ -6,11 +6,20 @@ parameters, run the (blocking) core functions on a worker thread so the
 asyncio event loop stays responsive, and convert PdfSearchError into
 plain-text replies instead of protocol errors.
 
+Transports: stdio (default, one subprocess per client) and streamable
+HTTP (`--transport http`, standalone server for clients on a trusted
+network). Tool behavior is identical on both — transport selection only
+affects how clients connect, never what the tools return.
+
+The HTTP transport has no authentication. It must only be bound to
+interfaces on trusted networks (the default bind is 127.0.0.1).
+
 Invariant: query preparation, relaxation, and input validation live in
 pdf_search/query — this layer adds nothing the CLI or Python API would
 have to duplicate.
 """
 
+import argparse
 import sys
 from functools import partial
 
@@ -213,12 +222,72 @@ async def stats() -> str:
     return "\n".join(lines)
 
 
+def _parse_args(argv=None):
+    """Parse server command-line arguments.
+
+    Args:
+        argv: list[str] | None — argument vector excluding the program
+            name. None reads sys.argv[1:] (the argparse default); tests
+            pass an explicit list.
+
+    Returns:
+        argparse.Namespace with:
+            transport: "stdio" | "http"
+            host: str — bind interface, used only when transport="http"
+            port: int — bind port (1-65535), used only when transport="http"
+
+    Exits with status 2 (argparse convention) on unknown arguments,
+    invalid choices, or a port outside 1-65535.
+    """
+    parser = argparse.ArgumentParser(
+        prog="pdf-search-mcp",
+        description="MCP server for full-text search across PDF collections.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="stdio: one server subprocess per client, spawned by the MCP"
+        " client (default). http: standalone streamable-HTTP server that"
+        " multiple clients connect to over the network.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind interface for --transport http (default: 127.0.0.1;"
+        " use 0.0.0.0 to accept connections from other machines)."
+        " Ignored for stdio.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Bind port for --transport http (default: 8000)."
+        " Ignored for stdio.",
+    )
+    args = parser.parse_args(argv)
+    # argparse type=int accepts any integer; uvicorn would fail later
+    # with an OS-level error, so reject out-of-range ports up front.
+    if not 1 <= args.port <= 65535:
+        parser.error(f"--port must be in 1-65535, got {args.port}")
+    return args
+
+
 def main():
     """Entry point for the console script and python -m."""
+    args = _parse_args()
     if not DB_PATH.exists():
         print(
             "Warning: No search index found. Index PDFs first:",
             "PDF_SEARCH_DIR=/path/to/pdfs python -m pdf_search_mcp.pdf_search index",
             file=sys.stderr,
         )
-    mcp.run()
+    if args.transport == "http":
+        # FastMCP reads bind address from its settings object, not from
+        # run() arguments. The MCP endpoint is served at /mcp (SDK
+        # default) — clients connect to http://<host>:<port>/mcp.
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run()

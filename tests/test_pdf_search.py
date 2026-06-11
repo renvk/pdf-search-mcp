@@ -1,11 +1,14 @@
 """Integration tests for pdf_search.py — indexing, search, read, render, stats."""
 
+import os
 import sqlite3
 
 import pytest
 
 from pdf_search_mcp.pdf_search import (
     PdfSearchError,
+    _HL_CLOSE,
+    _HL_OPEN,
     _MAX_RENDER_EDGE_PX,
     _compute_region_dpi,
     _density_components,
@@ -15,6 +18,7 @@ from pdf_search_mcp.pdf_search import (
     reindex_pdfs,
     render_pdf_page,
     search_pdfs,
+    search_with_relaxation,
 )
 
 
@@ -51,14 +55,14 @@ class TestIndexPdfs:
         assert 1 not in pages
 
     def test_stores_metadata(self, temp_db, sample_pdfs):
-        """Index stores pdf_dir, total_files, total_pages, last_indexed in meta."""
+        """Index stores pdf_dir and last_indexed in meta. Totals are NOT
+        cached — they are derived from the tables at read time so they
+        cannot go stale after an interrupted run."""
         index_pdfs(str(sample_pdfs))
         conn = sqlite3.connect(str(temp_db))
         meta = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta")}
         conn.close()
         assert "pdf_dir" in meta
-        assert "total_files" in meta
-        assert "total_pages" in meta
         assert "last_indexed" in meta
 
     def test_records_subfolder(self, temp_db, sample_pdfs):
@@ -103,6 +107,19 @@ class TestIndexPdfs:
         with pytest.raises(PdfSearchError, match="No PDF directory"):
             index_pdfs(None)
 
+    def test_error_empty_env_var(self, temp_db, monkeypatch):
+        """An empty PDF_SEARCH_DIR must error, not index the CWD —
+        Path('').resolve() is the current working directory."""
+        monkeypatch.setenv("PDF_SEARCH_DIR", "")
+        with pytest.raises(PdfSearchError, match="No PDF directory"):
+            index_pdfs(None)
+
+    def test_error_whitespace_pdf_dir_argument(self, temp_db, monkeypatch):
+        """A whitespace-only argument is treated as unset, same as the env var."""
+        monkeypatch.delenv("PDF_SEARCH_DIR", raising=False)
+        with pytest.raises(PdfSearchError, match="No PDF directory"):
+            index_pdfs("   ")
+
     def test_error_nonexistent_directory(self, temp_db):
         """Raise PdfSearchError for a path that doesn't exist."""
         with pytest.raises(PdfSearchError, match="not a directory"):
@@ -118,6 +135,51 @@ class TestIndexPdfs:
         assert result["files_unchanged"] == 3
         assert result["total_files"] == 3
         assert result["total_pages"] == 4
+
+    def test_dangling_symlink_does_not_abort_sync(self, temp_db, sample_pdfs):
+        """A broken symlink named *.pdf is recorded as a per-file error;
+        the remaining PDFs must still be indexed (previously the unguarded
+        stat() aborted the whole run with FileNotFoundError)."""
+        (sample_pdfs / "dangling.pdf").symlink_to(sample_pdfs / "no-such-target.pdf")
+        result = index_pdfs(str(sample_pdfs))
+        assert result["files_added"] == 3
+        assert any("dangling.pdf" in fname for fname, _ in result["errors"])
+
+    def test_partial_extraction_failure_leaves_no_orphan_pages(
+        self, temp_db, sample_pdfs, monkeypatch
+    ):
+        """A PDF failing mid-extraction must roll back its partial page
+        inserts. Previously the pages stayed without a files row, so every
+        rerun re-inserted them — duplicate rows accumulated."""
+        def failing_index(conn, filepath, fname_nfc, subfolder):
+            conn.execute(
+                "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
+                (fname_nfc, subfolder, 1, "partial content"),
+            )
+            raise RuntimeError("extraction failed mid-file")
+
+        monkeypatch.setattr(
+            "pdf_search_mcp.pdf_search._index_single_pdf", failing_index
+        )
+        for run in (1, 2):
+            result = index_pdfs(str(sample_pdfs))
+            assert len(result["errors"]) == 3
+            conn = sqlite3.connect(str(temp_db))
+            orphans = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+            conn.close()
+            assert orphans == 0, f"run {run} left orphan page rows"
+
+    def test_outdated_schema_rejected(self, temp_db, sample_pdfs):
+        """Incremental writes into a v1 table (searchable file/page columns)
+        would mix schemas — index must demand a reindex instead."""
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            "CREATE VIRTUAL TABLE pages USING fts5(file, subfolder, page, content)"
+        )
+        conn.commit()
+        conn.close()
+        with pytest.raises(PdfSearchError, match="outdated schema"):
+            index_pdfs(str(sample_pdfs))
 
 
 # --- Search ---
@@ -137,6 +199,11 @@ class TestSearchPdfs:
         assert ">>>" in results[0]["snippet"]
         assert "<<<" in results[0]["snippet"]
 
+    def test_results_have_only_public_keys(self, indexed_db):
+        """Internal ranking fields must not leak into tool output."""
+        results = search_pdfs("pressure", limit=1)
+        assert set(results[0]) == {"file", "subfolder", "page", "snippet"}
+
     def test_limit_works(self, indexed_db):
         results = search_pdfs("pressure", limit=1)
         assert len(results) <= 1
@@ -149,6 +216,113 @@ class TestSearchPdfs:
         """PdfSearchError when DB doesn't exist."""
         with pytest.raises(PdfSearchError, match="No index found"):
             search_pdfs("test")
+
+    def test_negative_limit_raises(self, indexed_db):
+        """limit=-1 would become SQL 'LIMIT -3' (unlimited fetch) and the
+        final slice would silently drop the last result."""
+        with pytest.raises(PdfSearchError, match="positive integer"):
+            search_pdfs("pressure", limit=-1)
+
+    def test_zero_limit_raises(self, indexed_db):
+        with pytest.raises(PdfSearchError, match="positive integer"):
+            search_pdfs("pressure", limit=0)
+
+    def test_filename_tokens_do_not_match(self, indexed_db):
+        """The file column is UNINDEXED: searching 'basics' (a filename,
+        not page content) must return nothing. Previously every query term
+        could match filenames and page numbers, polluting results."""
+        assert search_pdfs("basics", limit=10) == []
+
+    def test_invalid_db_file_raises_clear_error(self, temp_db, monkeypatch):
+        """PDF_SEARCH_DB pointing at a non-database file must produce a
+        PdfSearchError, not a raw sqlite3.DatabaseError."""
+        temp_db.write_text("this is not a sqlite database")
+        with pytest.raises(PdfSearchError, match="not a valid search index"):
+            search_pdfs("test")
+
+    def test_outdated_schema_raises(self, temp_db):
+        """Searching a v1 index must demand a reindex."""
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            "CREATE VIRTUAL TABLE pages USING fts5(file, subfolder, page, content)"
+        )
+        conn.commit()
+        conn.close()
+        with pytest.raises(PdfSearchError, match="outdated schema"):
+            search_pdfs("test")
+
+    def test_db_path_with_hash_character(self, tmp_path, monkeypatch, sample_pdfs):
+        """A '#' in the DB path must not be parsed as a URI fragment —
+        previously every read-only connection opened (and created) a
+        truncated path instead of the real database."""
+        db_dir = tmp_path / "c#dir"
+        db_dir.mkdir()
+        db_path = db_dir / "pdf_index.db"
+        monkeypatch.setattr("pdf_search_mcp.pdf_search.DB_PATH", db_path)
+        index_pdfs(str(sample_pdfs))
+        results = search_pdfs("pressure", limit=5)
+        assert results
+        assert not (tmp_path / "c").exists()  # no stray truncated file
+
+
+# --- Search with relaxation (prepared user queries) ---
+
+
+class TestSearchWithRelaxation:
+    def test_direct_match_no_note(self, indexed_db):
+        results, note = search_with_relaxation("pressure vessels", 10)
+        assert results
+        assert note == ""
+
+    def test_german_expansion_applies(self, indexed_db):
+        """'Aussendurchmesser' must match the page containing
+        'Außendurchmesser' via reverse digraph expansion (one position
+        at a time, so a single-conversion word is used)."""
+        results, note = search_with_relaxation("Aussendurchmesser", 10)
+        assert any(r["file"] == "basics.pdf" for r in results)
+
+    def test_drops_least_represented_term(self, indexed_db):
+        """3+ terms with one nonexistent: phase 1 drops the term whose
+        removal yields the most matches corpus-wide."""
+        results, note = search_with_relaxation("pressure vessels xyznonexistent", 10)
+        assert results
+        assert "Relaxed to" in note
+        assert "xyznonexistent" not in note  # dropped term excluded from note
+
+    def test_two_terms_or_fallback(self, indexed_db):
+        """With 2 terms, phase 1 is skipped and the OR fallback runs."""
+        results, note = search_with_relaxation("pressure xyznonexistent", 10)
+        assert results
+        assert "any term" in note
+
+    def test_all_terms_missing(self, indexed_db):
+        results, note = search_with_relaxation("qqq zzz xxx", 10)
+        assert results == []
+        assert note == ""
+
+    def test_structured_query_not_relaxed(self, indexed_db):
+        """Explicit operators bypass relaxation entirely."""
+        results, note = search_with_relaxation("xyznonexistent AND pressure", 10)
+        assert results == []
+        assert note == ""
+
+    def test_colon_term_searches_cleanly(self, indexed_db):
+        """Bug #Q1 end-to-end: '1:100' used to raise 'no such column: 1'
+        straight through the tool layer."""
+        results, note = search_with_relaxation("Maßstab 1:100", 10)
+        assert isinstance(results, list)  # no exception is the assertion
+
+    def test_no_searchable_terms_raises(self, indexed_db):
+        """Pure punctuation prepares to '' — a clear error, not silence."""
+        with pytest.raises(PdfSearchError, match="no searchable terms"):
+            search_with_relaxation("()", 10)
+
+    def test_invalid_fts5_surfaces_as_pdf_search_error(self, indexed_db):
+        """'NOT term' is invalid FTS5 (NOT is binary). The error must
+        surface as PdfSearchError, never as silent zero results — masking
+        syntax errors as 'no matches' misleads the caller about the corpus."""
+        with pytest.raises(PdfSearchError, match="Search failed"):
+            search_with_relaxation("NOT pressure", 10)
 
 
 # --- Read ---
@@ -168,6 +342,72 @@ class TestReadPdfPage:
         with pytest.raises(PdfSearchError, match="out of range"):
             read_pdf_page("basics.pdf", 0)
 
+    def test_corrupted_file_raises_pdf_search_error(self, indexed_db):
+        """A file corrupted after indexing must raise PdfSearchError, not
+        leak fitz.FileDataError through the tool layer."""
+        _, pdf_dir = indexed_db
+        (pdf_dir / "basics.pdf").write_bytes(b"no longer a pdf")
+        with pytest.raises(PdfSearchError, match="Cannot open"):
+            read_pdf_page("basics.pdf", 1)
+
+
+# --- Duplicate filename resolution ---
+
+
+class TestDuplicateResolution:
+    @pytest.fixture
+    def dup_index(self, temp_db, sample_pdfs, make_pdf):
+        """Same filename in root and in sub/ with distinct content."""
+        make_pdf(sample_pdfs / "dup.pdf", "ROOT copy content marker")
+        sub = sample_pdfs / "sub"
+        sub.mkdir()
+        make_pdf(sub / "dup.pdf", "SUB copy content marker")
+        index_pdfs(str(sample_pdfs))
+        return sample_pdfs
+
+    def test_unspecified_subfolder_with_duplicates_raises(self, dup_index):
+        """An arbitrary pick would silently return the wrong document —
+        the previous SELECT ... LIMIT 1 had no ORDER BY."""
+        with pytest.raises(PdfSearchError, match="Multiple files named"):
+            read_pdf_page("dup.pdf", 1)
+
+    def test_empty_string_selects_root_copy(self, dup_index):
+        """'' is the stored subfolder value for root files. Previously the
+        wrapper coerced '' to None, making the root copy unselectable."""
+        text = read_pdf_page("dup.pdf", 1, subfolder="")
+        assert "ROOT copy" in text
+
+    def test_subfolder_selects_sub_copy(self, dup_index):
+        text = read_pdf_page("dup.pdf", 1, subfolder="sub")
+        assert "SUB copy" in text
+
+    def test_unique_file_needs_no_subfolder(self, dup_index):
+        """Non-duplicated files keep resolving without a subfolder."""
+        text = read_pdf_page("basics.pdf", 1)
+        assert "pressure vessels" in text
+
+
+# --- Image-only PDFs ---
+
+
+class TestImageOnlyPdf:
+    def test_resolvable_despite_zero_text_pages(self, temp_db, sample_pdfs):
+        """A scanned (image-only) PDF has a files row but no pages rows.
+        Resolution now uses the files table, so read/render must work —
+        read_page_image is exactly the tool needed for scanned PDFs."""
+        doc_path = sample_pdfs / "imageonly.pdf"
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+        page.draw_rect(fitz.Rect(50, 50, 200, 200), color=(0, 0, 0), fill=(1, 0, 0))
+        doc.save(str(doc_path))
+        doc.close()
+
+        index_pdfs(str(sample_pdfs))
+        assert read_pdf_page("imageonly.pdf", 1) == ""
+        path = render_pdf_page("imageonly.pdf", 1)
+        assert path.exists()
+
 
 # --- Render ---
 
@@ -178,51 +418,96 @@ class TestRenderPdfPage:
         assert path.exists()
         assert str(path).endswith(".png")
 
-    def test_render_output_is_valid_png(self, indexed_db):
+    def test_render_output_is_valid_png(self, indexed_db, png_magic):
         """Rendered file starts with PNG magic bytes regardless of renderer."""
         path = render_pdf_page("basics.pdf", 1)
         with open(path, "rb") as f:
             magic = f.read(8)
-        assert magic == b"\x89PNG\r\n\x1a\n"
+        assert magic == png_magic
 
-    def test_pymupdf_fallback(self, indexed_db, monkeypatch):
+    def test_pymupdf_fallback(self, indexed_db, monkeypatch, png_magic):
         """With CG disabled, PyMuPDF fallback still produces a valid PNG."""
         import pdf_search_mcp.pdf_search as mod
         monkeypatch.setattr(mod, "_USE_COREGRAPHICS", False)
         path = render_pdf_page("basics.pdf", 1)
         with open(path, "rb") as f:
             magic = f.read(8)
-        assert magic == b"\x89PNG\r\n\x1a\n"
+        assert magic == png_magic
 
     def test_page_out_of_range(self, indexed_db):
         with pytest.raises(PdfSearchError, match="out of range"):
             render_pdf_page("basics.pdf", 999)
 
-    def test_region_returns_valid_png(self, indexed_db):
+    def test_zero_dpi_raises(self, indexed_db):
+        """dpi=0 produced a zero-size CG bitmap and a 0-byte PNG that was
+        reported as a successful render."""
+        with pytest.raises(PdfSearchError, match="dpi must be"):
+            render_pdf_page("basics.pdf", 1, dpi=0)
+
+    def test_zero_area_region_raises(self, indexed_db):
+        """A zero-area region divided by zero in auto-DPI when called via
+        the public API (validation only existed in the MCP tool layer)."""
+        with pytest.raises(PdfSearchError, match="x1 must be < x2"):
+            render_pdf_page("basics.pdf", 1, region=[0.5, 0.5, 0.5, 0.5])
+
+    def test_region_out_of_bounds_raises(self, indexed_db):
+        with pytest.raises(PdfSearchError, match="between 0.0 and 1.0"):
+            render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 0.5, 1.5])
+
+    def test_region_wrong_length_raises(self, indexed_db):
+        with pytest.raises(PdfSearchError, match="4 floats"):
+            render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 0.5])
+
+    def test_region_returns_valid_png(self, indexed_db, png_magic):
         """Region crop produces a valid PNG file."""
         path = render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 0.5, 0.5])
         assert path.exists()
         with open(path, "rb") as f:
-            assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+            assert f.read(8) == png_magic
 
     def test_region_filename_includes_coords(self, indexed_db):
         """Output filename includes region tag to avoid cache collisions."""
         path = render_pdf_page("basics.pdf", 1, region=[0.1, 0.2, 0.8, 0.9])
         assert "_r0.10_0.20_0.80_0.90" in str(path)
 
-    def test_region_with_pymupdf_fallback(self, indexed_db, monkeypatch):
+    def test_region_with_pymupdf_fallback(self, indexed_db, monkeypatch, png_magic):
         """Region rendering works via PyMuPDF when CG is disabled."""
         import pdf_search_mcp.pdf_search as mod
         monkeypatch.setattr(mod, "_USE_COREGRAPHICS", False)
         path = render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 1.0, 0.5])
         with open(path, "rb") as f:
-            assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+            assert f.read(8) == png_magic
 
     def test_region_none_renders_full_page(self, indexed_db):
         """Explicit region=None behaves like no region (full page)."""
         path = render_pdf_page("basics.pdf", 1, region=None)
         assert path.exists()
         assert "_r0" not in path.name
+
+    def test_duplicate_filenames_render_to_distinct_paths(
+        self, temp_db, sample_pdfs, make_pdf
+    ):
+        """Renders of same-named files in different subfolders must not
+        overwrite each other — the output name now hashes the full source
+        path. Previously the second render clobbered the first."""
+        make_pdf(sample_pdfs / "dup.pdf", "ROOT copy")
+        sub = sample_pdfs / "sub"
+        sub.mkdir()
+        make_pdf(sub / "dup.pdf", "SUB copy")
+        index_pdfs(str(sample_pdfs))
+
+        path_root = render_pdf_page("dup.pdf", 1, subfolder="")
+        path_sub = render_pdf_page("dup.pdf", 1, subfolder="sub")
+        assert path_root != path_sub
+
+    def test_repeated_render_reuses_cached_file(self, indexed_db):
+        """Same page/DPI/region returns the cached PNG without re-rendering
+        (observable via unchanged mtime)."""
+        path1 = render_pdf_page("basics.pdf", 1)
+        mtime1 = path1.stat().st_mtime_ns
+        path2 = render_pdf_page("basics.pdf", 1)
+        assert path1 == path2
+        assert path2.stat().st_mtime_ns == mtime1
 
 
 # --- Compute Region DPI ---
@@ -276,9 +561,10 @@ class TestComputeRegionDpi:
 
 class TestIndexStats:
     def test_correct_counts(self, indexed_db):
+        """Counts come from the tables directly, as integers."""
         info = index_stats()
-        assert info["total_files"] == "3"
-        assert info["total_pages"] == "4"
+        assert info["total_files"] == 3
+        assert info["total_pages"] == 4
 
     def test_renderer_field(self, indexed_db):
         """Stats include active renderer name (CoreGraphics or PyMuPDF)."""
@@ -292,6 +578,12 @@ class TestIndexStats:
 
     def test_no_index_raises(self, temp_db):
         with pytest.raises(PdfSearchError, match="No index found"):
+            index_stats()
+
+    def test_invalid_db_file_raises_clear_error(self, temp_db):
+        """A non-database file must raise PdfSearchError, not DatabaseError."""
+        temp_db.write_text("not a database")
+        with pytest.raises(PdfSearchError, match="not a valid search index"):
             index_stats()
 
 
@@ -342,6 +634,17 @@ class TestReindexPdfs:
         with pytest.raises(PdfSearchError):
             reindex_pdfs()
         assert not db_path.exists()
+
+    def test_rebuilds_outdated_schema(self, temp_db, sample_pdfs):
+        """reindex is the documented migration path from the v1 schema."""
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            "CREATE VIRTUAL TABLE pages USING fts5(file, subfolder, page, content)"
+        )
+        conn.commit()
+        conn.close()
+        result = reindex_pdfs(str(sample_pdfs))
+        assert result["total_files"] == 3
 
 
 # --- Incremental Indexing ---
@@ -445,7 +748,7 @@ class TestIncrementalIndex:
         result = index_pdfs(str(pdf_dir))
         assert len(result["errors"]) == 1
         assert result["files_updated"] == 1  # attempted update
-        # Old content should still be searchable because savepoint rolled back
+        # Old content should still be searchable because rollback restored it
         hits = search_pdfs("pressure vessels")
         assert any(r["file"] == "basics.pdf" for r in hits)
 
@@ -458,35 +761,47 @@ class TestDensityRanking:
 
     def test_density_components_multiple_close(self):
         """Markers clustered together yield high clustering."""
-        text = ">>>a<<< >>>b<<< >>>c<<< some filler text that goes on for a while"
-        mc, cd, cl = _density_components(text)
-        assert mc == 3
+        text = (
+            f"{_HL_OPEN}a{_HL_CLOSE} {_HL_OPEN}b{_HL_CLOSE} {_HL_OPEN}c{_HL_CLOSE}"
+            " some filler text that goes on for a while"
+        )
+        cd, cl = _density_components(text)
         assert cd > 0
         # all markers in the first ~30 chars of a ~65-char string → high clustering
         assert cl > 0.6
 
     def test_density_components_multiple_spread(self):
         """Markers spread across the text yield low clustering."""
-        text = ">>>a<<<" + " " * 200 + ">>>b<<<" + " " * 200 + ">>>c<<<"
-        mc, cd, cl = _density_components(text)
-        assert mc == 3
+        text = (
+            f"{_HL_OPEN}a{_HL_CLOSE}" + " " * 200
+            + f"{_HL_OPEN}b{_HL_CLOSE}" + " " * 200
+            + f"{_HL_OPEN}c{_HL_CLOSE}"
+        )
+        cd, cl = _density_components(text)
         # span covers nearly the entire string → low clustering
         assert cl < 0.1
 
     def test_density_components_single_match(self):
         """One marker returns neutral clustering (0.5)."""
-        text = "some text with >>>one<<< match"
-        mc, cd, cl = _density_components(text)
-        assert mc == 1
+        text = f"some text with {_HL_OPEN}one{_HL_CLOSE} match"
+        cd, cl = _density_components(text)
+        assert cd > 0
         assert cl == 0.5
 
     def test_density_components_no_markers(self):
-        """No markers returns zeros for count/density, neutral clustering."""
+        """No markers returns zero density, neutral clustering."""
         text = "plain text with no matches"
-        mc, cd, cl = _density_components(text)
-        assert mc == 0
+        cd, cl = _density_components(text)
         assert cd == 0.0
         assert cl == 0.5
+
+    def test_literal_angle_markers_do_not_count(self):
+        """Pages whose TEXT contains literal '>>>' (shell transcripts,
+        quoted email) must not inflate the density score — counting now
+        uses control-character sentinels that never occur in page text."""
+        text = ">>> >>> >>> literal shell prompt lines, zero real matches"
+        cd, cl = _density_components(text)
+        assert cd == 0.0
 
     def test_dense_page_ranks_higher(self, temp_db, make_pdf, tmp_path):
         """A page with dense term occurrences outranks a page with one mention.

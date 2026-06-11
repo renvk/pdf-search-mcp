@@ -1,76 +1,49 @@
 #!/usr/bin/env python3
 """MCP server exposing PDF search tools.
 
-Wraps the pdf_search module for use by MCP clients.
+Thin wrapper over the pdf_search module: tools validate/clamp tool-level
+parameters, run the (blocking) core functions on a worker thread so the
+asyncio event loop stays responsive, and convert PdfSearchError into
+plain-text replies instead of protocol errors.
+
+Invariant: query preparation, relaxation, and input validation live in
+pdf_search/query — this layer adds nothing the CLI or Python API would
+have to duplicate.
 """
 
-import re
-import sqlite3
 import sys
+from functools import partial
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
-from .pdf_search import DB_PATH, PdfSearchError, index_stats, read_pdf_page, render_pdf_page, search_pdfs
-from .query import prepare_query
+from .pdf_search import (
+    DB_PATH,
+    PdfSearchError,
+    index_stats,
+    read_pdf_page,
+    render_pdf_page,
+    search_with_relaxation,
+)
 
 mcp = FastMCP("pdf-search-mcp")
 
+# Upper bound for full-page render DPI. Region crops auto-scale their DPI
+# in the core layer instead (see pdf_search._MAX_REGION_DPI).
 _MAX_DPI = 600
-# Region crops are clipped, so output stays bounded by _MAX_RENDER_EDGE_PX
-# (1568 px). Higher DPI just adds detail within that pixel budget.
-_MAX_REGION_DPI = 2500
 
-# FTS5 boolean operators — case-sensitive (FTS5 requires uppercase)
-_FTS5_OPERATORS = frozenset({"AND", "OR", "NOT"})
-
-# Detect NEAR() expressions to skip relaxation on structured queries
-_NEAR_PAT = re.compile(r"NEAR\s*\(", re.IGNORECASE)
+# Upper bound for search result count — protects the client's context
+# window from a runaway limit argument.
+_MAX_LIMIT = 50
 
 
-def _extract_terms(query):
-    """Split a raw query into droppable terms for relaxation.
+async def _in_thread(func, *args, **kwargs):
+    """Run a blocking core function on a worker thread.
 
-    Quoted phrases are kept as single terms (including quotes).
-    Returns None if the query contains explicit FTS5 operators (AND, OR,
-    NOT) or NEAR() expressions — structured queries should not be relaxed.
-
-    Args:
-        query: Raw query string (before prepare_query).
-
-    Returns:
-        List of term strings, or None if relaxation should be skipped.
+    sqlite queries, PDF parsing, and rendering block for up to seconds;
+    running them inline would stall MCP pings and cancellation.
     """
-    if _NEAR_PAT.search(query):
-        return None
-    tokens = re.findall(r'"[^"]*"\*?|\S+', query)
-    if any(t in _FTS5_OPERATORS for t in tokens):
-        return None
-    return tokens or None
-
-
-def _try_search(query, limit):
-    """Prepare and execute a search with FTS5 error recovery.
-
-    Runs the query through prepare_query → search_pdfs.  If the prepared
-    form triggers an FTS5 syntax error, retries with the raw query.
-
-    Args:
-        query: Raw query string.
-        limit: Maximum number of results.
-
-    Returns:
-        List of result dicts, or empty list on no match / syntax error.
-    """
-    prepared = prepare_query(query)
-    try:
-        return search_pdfs(prepared, limit)
-    except sqlite3.OperationalError as e:
-        if "fts5" in str(e).lower():
-            try:
-                return search_pdfs(query, limit)
-            except sqlite3.OperationalError:
-                return []
-        raise
+    return await anyio.to_thread.run_sync(partial(func, *args, **kwargs))
 
 
 def _format_results(results):
@@ -83,86 +56,52 @@ def _format_results(results):
     return "\n\n".join(lines)
 
 
-def _relax_search(terms, limit):
-    """Progressively relax a multi-term AND query until results appear.
-
-    Phase 1 (3+ terms): try dropping each term individually, keep the
-    variant that returns the most results.  The dropped term is the one
-    least represented in the corpus.
-
-    Phase 2: OR all original terms.  BM25 ranking naturally prioritises
-    pages matching more terms.
-
-    Args:
-        terms: List of query terms (from _extract_terms).
-        limit: Maximum number of results.
-
-    Returns:
-        (results, note) tuple.  results is a list of dicts, note is a
-        human-readable string explaining what was actually searched.
-        Both empty when no relaxation produced results.
-    """
-    # Phase 1: single-term drops
-    if len(terms) >= 3:
-        best = []
-        best_idx = -1
-        for i in range(len(terms)):
-            subset = terms[:i] + terms[i + 1:]
-            results = _try_search(" ".join(subset), limit)
-            if len(results) > len(best):
-                best = results
-                best_idx = i
-        if best:
-            kept = terms[:best_idx] + terms[best_idx + 1:]
-            return best, f"No matches for full query. Relaxed to: {' '.join(kept)}"
-
-    # Phase 2: OR all terms
-    results = _try_search(" OR ".join(terms), limit)
-    if results:
-        return results, "No matches for full query. Showing pages matching any term."
-
-    return [], ""
-
-
 @mcp.tool()
-def search(query: str, limit: int = 10) -> str:
+async def search(query: str, limit: int = 10) -> str:
     """Search indexed PDFs using FTS5 full-text search.
 
     Supports FTS5 syntax: phrases ("exact phrase"), AND (implicit),
-    OR, NOT, prefix (term*), NEAR(term1 term2, 10).
+    OR, NOT, prefix (term*), NEAR(term1 term2, 10), parentheses.
 
-    Terms with dots, hyphens, commas, or slashes are auto-quoted (FTS5 treats
-    them as token separators). You can also quote them yourself: "13445-3", "v2.1".
+    Terms with special characters (dots, hyphens, colons, slashes, ...)
+    are auto-quoted — FTS5 treats them as token separators. You can also
+    quote them yourself: "13445-3", "v2.1".
 
-    German ß↔ss variants are expanded automatically.
+    German ß↔ss / ä↔ae / ö↔oe / ü↔ue variants are expanded automatically.
 
     When no results match all terms (implicit AND), the query is
-    automatically relaxed: first by dropping one term at a time, then
-    by OR-ing all terms.  A note at the top explains what was searched.
+    automatically relaxed: first by dropping the term least represented
+    in the corpus, then by OR-ing all terms.  A note at the top explains
+    what was searched.  Structured queries (explicit operators, NEAR,
+    parentheses) are never relaxed.
 
     Args:
-        query: FTS5 search query string.
-        limit: Maximum number of results (default 10).
+        query: Search query string.
+        limit: Maximum number of results (default 10, range 1-50).
 
     Returns:
         Formatted search results with file, subfolder, page, and snippet.
     """
-    results = _try_search(query, limit)
-    if results:
-        return _format_results(results)
+    if not query.strip():
+        return "Empty query. Provide one or more search terms."
+    if limit < 1:
+        return "limit must be a positive integer."
+    limit = min(limit, _MAX_LIMIT)
 
-    # Relax multi-term queries that have no explicit operators
-    terms = _extract_terms(query)
-    if terms and len(terms) >= 2:
-        relaxed, note = _relax_search(terms, limit)
-        if relaxed:
-            return note + "\n\n" + _format_results(relaxed)
+    try:
+        results, note = await _in_thread(search_with_relaxation, query, limit)
+    except PdfSearchError as e:
+        return str(e)
 
-    return "No results found."
+    if not results:
+        return "No results found."
+    if note:
+        return note + "\n\n" + _format_results(results)
+    return _format_results(results)
 
 
 @mcp.tool()
-def read_page(filename: str, page: int, subfolder: str = "") -> str:
+async def read_page(filename: str, page: int, subfolder: str | None = None) -> str:
     """Read the full text of a specific page from an indexed PDF.
 
     Use after search() to read the complete page content around a match.
@@ -174,25 +113,26 @@ def read_page(filename: str, page: int, subfolder: str = "") -> str:
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        subfolder: Subfolder as shown in search results (needed if duplicate filenames exist).
+        subfolder: Subfolder as shown in search results. Required when
+            duplicate filenames exist; pass "" for the root folder.
 
     Returns:
         Full extracted text of the page.
     """
     try:
-        text = read_pdf_page(filename, page, subfolder=subfolder or None)
+        text = await _in_thread(read_pdf_page, filename, page, subfolder=subfolder)
         return text if text else "No text found on this page."
     except PdfSearchError as e:
         return str(e)
 
 
 @mcp.tool()
-def read_page_image(
+async def read_page_image(
     filename: str,
     page: int,
     dpi: int = 140,
     region: list[float] | None = None,
-    subfolder: str = "",
+    subfolder: str | None = None,
 ) -> str:
     """Render a PDF page (or cropped region) as a PNG for visual inspection.
 
@@ -211,34 +151,31 @@ def read_page_image(
     Args:
         filename: PDF filename exactly as shown in search results.
         page: 1-based page number.
-        dpi: Render resolution (default 140, capped at 600). Leave at
+        dpi: Render resolution (default 140, range 1-600). Leave at
             default for full-page renders. Ignored when region is set
             (auto-scaled to fill 1568 px).
         region: Crop box [x1, y1, x2, y2], each value 0.0–1.0, top-left
             origin. Required for reading values from tables, formulas, or
             figures — full-page scale is not reliable for these.
             Example: [0.0, 0.5, 1.0, 0.8] = band from 50–80% down the page.
-        subfolder: Subfolder as shown in search results.
+        subfolder: Subfolder as shown in search results. Required when
+            duplicate filenames exist; pass "" for the root folder.
 
     Returns:
-        Path to the rendered PNG file.
+        The PNG file path on the first line. Full-page renders append a
+        crop-advisory line after the path — when passing the result to a
+        file reader, use only the first line.
     """
     dpi = min(dpi, _MAX_DPI)
-    if region is not None:
-        if len(region) != 4:
-            return "region must be [x1, y1, x2, y2] (4 floats, each 0.0–1.0)."
-        if not all(0.0 <= v <= 1.0 for v in region):
-            return "region values must be between 0.0 and 1.0."
-        x1, y1, x2, y2 = region
-        if x1 >= x2 or y1 >= y2:
-            return "Invalid region: x1 must be < x2 and y1 must be < y2."
-        # Region output is clipped to _MAX_RENDER_EDGE_PX, so higher DPI
-        # only adds detail — no risk of oversized images.
-        dpi = _MAX_REGION_DPI
     try:
         path = str(
-            render_pdf_page(
-                filename, page, dpi=dpi, subfolder=subfolder or None, region=region
+            await _in_thread(
+                render_pdf_page,
+                filename,
+                page,
+                dpi=dpi,
+                subfolder=subfolder,
+                region=region,
             )
         )
     except PdfSearchError as e:
@@ -252,12 +189,15 @@ def read_page_image(
 
 
 @mcp.tool()
-def stats() -> str:
+async def stats() -> str:
     """Show PDF search index statistics (file count, page count, DB size, renderer)."""
     try:
-        info = index_stats()
-    except PdfSearchError:
-        return "No index found. Index PDFs first: PDF_SEARCH_DIR=/path/to/pdfs python -m pdf_search_mcp.pdf_search index"
+        info = await _in_thread(index_stats)
+    except PdfSearchError as e:
+        return (
+            f"{e}\nIndex PDFs first: "
+            "PDF_SEARCH_DIR=/path/to/pdfs python -m pdf_search_mcp.pdf_search index"
+        )
 
     lines = [
         f"Files: {info['total_files']}, "

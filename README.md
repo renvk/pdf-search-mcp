@@ -106,33 +106,43 @@ Uses [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
 | Prefix | `concur*` | Prefix matching |
 | NEAR | `NEAR(load balancer, 10)` | Terms within 10 tokens of each other |
 
-**Auto-quoting:** Terms containing dots, hyphens, commas, or slashes are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`) because FTS5 treats these as token separators.
+**Auto-quoting:** Terms containing any special character (dots, hyphens, commas, slashes, colons, ...) are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`, `1:100` becomes `"1:100"`) because FTS5 treats these as token separators or operators. Query preparation guarantees valid FTS5 syntax for any input — stray quotes are dropped and unbalanced parentheses are repaired.
 
-**German expansion:** Umlauts and eszett are automatically expanded to their digraph equivalents and vice versa (`ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue`). Searching for `Größe` also finds `Groesse`, and `Weißbuch` also finds `Weissbuch`.
+**German expansion:** Umlauts and eszett are automatically expanded to their digraph equivalents and vice versa (`ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue`). Searching for `Größe` also finds `Groesse`, and `Weißbuch` also finds `Weissbuch`. Reverse expansion (`ss`→`ß`) replaces one position at a time. Expansion also applies inside `NEAR()` expressions.
 
-**Auto-relaxation:** When a multi-term query returns no results (all terms must appear on the same page), the search automatically relaxes: first by dropping one term at a time to find the term blocking results, then by OR-ing all terms. A note in the output explains what was actually searched. Queries with explicit operators (AND, OR, NOT, NEAR) are not relaxed.
+**Auto-relaxation:** When a multi-term query returns no results (all terms must appear on the same page), the search automatically relaxes: first by dropping the term least represented in the corpus (chosen by uncapped match counts), then by OR-ing all terms. A note in the output explains what was actually searched. Structured queries (explicit AND, OR, NOT, NEAR, parentheses) are not relaxed.
 
 ## MCP Tools
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `search` | `query`, `limit=10` | Full-text search with ranked results and snippets |
-| `read_page` | `filename`, `page`, `subfolder=""` | Read the full text of a specific page |
-| `read_page_image` | `filename`, `page`, `dpi=140`, `region=None`, `subfolder=""` | Render a page (or cropped region) as PNG. `region=[x1,y1,x2,y2]` with 0.0–1.0 fractional coords to crop; DPI auto-scales for the cropped area |
+| `search` | `query`, `limit=10` | Full-text search with ranked results and snippets (limit range 1-50) |
+| `read_page` | `filename`, `page`, `subfolder=None` | Read the full text of a specific page |
+| `read_page_image` | `filename`, `page`, `dpi=140`, `region=None`, `subfolder=None` | Render a page (or cropped region) as PNG. `region=[x1,y1,x2,y2]` with 0.0–1.0 fractional coords to crop; DPI auto-scales for the cropped area |
 | `stats` | *(none)* | Show index statistics (file count, pages, DB size, renderer) |
+
+When the same filename exists in several subfolders, `read_page` and `read_page_image` require the `subfolder` parameter (`""` selects the root folder); an unspecified subfolder returns an error listing the candidates instead of picking one arbitrarily.
 
 ## Python API
 
 ```python
-from pdf_search_mcp import search_pdfs, read_pdf_page, render_pdf_page, index_pdfs
+from pdf_search_mcp import (
+    search_with_relaxation, search_pdfs, prepare_query,
+    read_pdf_page, render_pdf_page, index_pdfs,
+)
 
 # Index PDFs
 index_pdfs("/path/to/pdfs")
 
-# Search
-results = search_pdfs("garbage collection", limit=5)
+# Search with the full pipeline (auto-quoting, German expansion,
+# relaxation) — same behavior as the MCP search tool and the CLI
+results, note = search_with_relaxation("ISO-27001 Anhang", limit=5)
 for r in results:
     print(f"{r['subfolder']}/{r['file']} p.{r['page']}: {r['snippet']}")
+
+# Low-level: search_pdfs takes a RAW FTS5 MATCH string (no preparation).
+# Run user input through prepare_query first.
+results = search_pdfs(prepare_query("garbage collection"), limit=5)
 
 # Read full page text
 text = read_pdf_page("document.pdf", 42)
@@ -146,7 +156,9 @@ png_path = render_pdf_page("document.pdf", 42, region=[0.0, 0.5, 1.0, 0.8])
 
 ## How It Works
 
-1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed. Subdirectory names are preserved as a `subfolder` column for context. Directories starting with `_` are skipped.
+1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed, each committed individually so an interrupted run resumes where it stopped. Only page content is searchable — filenames, subfolders, and page numbers are stored as unindexed metadata so query terms cannot match them. Directories starting with `_` are skipped.
+
+> **Upgrading to 0.3.0:** the FTS5 schema changed (metadata columns are no longer searchable). Existing indexes are detected and refused with a clear error — run `python -m pdf_search_mcp.pdf_search reindex` once to rebuild.
 
 2. **Searching** runs FTS5 MATCH queries and re-ranks results by combining BM25 relevance with match density — pages where search terms cluster together score higher than pages with the same terms scattered throughout. The density signal blends term concentration (matches per character) and spatial clustering (how tightly grouped the matches are).
 

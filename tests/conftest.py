@@ -9,6 +9,15 @@ import pytest
 
 from pdf_search_mcp.pdf_search import index_pdfs
 
+# First 8 bytes of every valid PNG file — shared by all render tests
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.fixture
+def png_magic():
+    """PNG magic bytes as a fixture so test files need no cross-imports."""
+    return PNG_MAGIC
+
 
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):

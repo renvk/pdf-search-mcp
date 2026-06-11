@@ -9,9 +9,9 @@ plain-text replies instead of protocol errors.
 Transports: stdio (default, one subprocess per client) and streamable
 HTTP (`--transport http`, standalone server for clients on a trusted
 network). search, read_page, and stats behave identically on both.
-Exception: read_page_image returns a file path on the machine running
-the server — usable over stdio (client and server share a filesystem),
-not usable by HTTP clients on other machines.
+read_page_image adapts its return to the transport: a PNG file path on
+stdio (client and server share a filesystem), inline MCP image content
+on HTTP (remote clients cannot open server-local paths).
 
 The HTTP transport has no authentication. Bind it only to interfaces
 on trusted networks (default bind: 127.0.0.1).
@@ -26,7 +26,7 @@ import sys
 from functools import partial
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from .pdf_search import (
     DB_PATH,
@@ -38,6 +38,11 @@ from .pdf_search import (
 )
 
 mcp = FastMCP("pdf-search-mcp")
+
+# True when main() selected --transport http. Module-level because tools
+# are registered at import time, before the transport is known; read by
+# read_page_image to pick its return form (path vs inline image).
+_HTTP_TRANSPORT = False
 
 # Upper bound for full-page render DPI. Region crops auto-scale their DPI
 # in the core layer instead (see pdf_search._MAX_REGION_DPI).
@@ -137,6 +142,10 @@ async def read_page(filename: str, page: int, subfolder: str | None = None) -> s
         return str(e)
 
 
+# No return annotation on purpose: an annotation makes FastMCP generate
+# a structured {result: string} output schema, which cannot represent
+# the Image content returned in HTTP mode (a union annotation including
+# Image fails pydantic schema generation at tool registration).
 @mcp.tool()
 async def read_page_image(
     filename: str,
@@ -144,11 +153,11 @@ async def read_page_image(
     dpi: int = 140,
     region: list[float] | None = None,
     subfolder: str | None = None,
-) -> str:
+):
     """Render a PDF page (or cropped region) as a PNG for visual inspection.
 
     Use instead of read_page() when text extraction misses formulas, diagrams,
-    or tables. Returns a file path — read it with the Read tool to view.
+    or tables.
 
     Workflow:
     1. First call: render the full page (no region, default dpi) to orient
@@ -173,9 +182,14 @@ async def read_page_image(
             duplicate filenames exist; pass "" for the root folder.
 
     Returns:
-        The PNG file path on the first line. Full-page renders append a
-        crop-advisory line after the path — when passing the result to a
-        file reader, use only the first line.
+        stdio transport: the PNG file path on the first line — open it
+            with your file-reading tool to view. Full-page renders append
+            a crop-advisory line after the path; when passing the result
+            to a file reader, use only the first line.
+        http transport: the rendered PNG as inline image content (no file
+            access needed). Full-page renders include the crop advisory
+            as an additional text item.
+        On error: a plain-text message describing the problem.
     """
     dpi = min(dpi, _MAX_DPI)
     try:
@@ -191,11 +205,22 @@ async def read_page_image(
         )
     except PdfSearchError as e:
         return str(e)
+
+    advisory = (
+        "Crop to tables/figures with region before reading values"
+        " (e.g. region=[0.0, 0.3, 1.0, 0.7] for a mid-page table)."
+    )
+    if _HTTP_TRANSPORT:
+        # Remote clients cannot open a server-local path, so the PNG is
+        # returned inline. The file stays on disk — it is the render
+        # cache keyed by (file, page, dpi, region), see
+        # pdf_search._render_output_path.
+        image = Image(path=path)
+        if region is None:
+            return [image, advisory]
+        return image
     if region is None:
-        path += (
-            "\nCrop to tables/figures with region before reading values"
-            " (e.g. region=[0.0, 0.3, 1.0, 0.7] for a mid-page table)."
-        )
+        path += "\n" + advisory
     return path
 
 
@@ -285,6 +310,8 @@ def main():
             file=sys.stderr,
         )
     if args.transport == "http":
+        global _HTTP_TRANSPORT
+        _HTTP_TRANSPORT = True
         # FastMCP reads bind address from its settings object, not from
         # run() arguments. The MCP endpoint is served at /mcp (SDK
         # default) — clients connect to http://<host>:<port>/mcp.

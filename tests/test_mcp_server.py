@@ -5,9 +5,11 @@ loop stays responsive); tests drive them with asyncio.run().
 """
 
 import asyncio
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from mcp.server.fastmcp import Image
 
 from pdf_search_mcp.mcp_server import (
     _parse_args,
@@ -17,6 +19,10 @@ from pdf_search_mcp.mcp_server import (
     search,
     stats,
 )
+
+# First 8 bytes of every valid PNG file — used to verify the tool
+# returns a real render, not just any file.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def run(coro):
@@ -219,6 +225,53 @@ class TestReadPageImage:
         assert "x1 must be < x2" in result
 
 
+class TestReadPageImageHttpMode:
+    """HTTP-transport return form: inline image content instead of a path.
+
+    Remote clients cannot open a server-local path (and e.g. Claude
+    Desktop has no file-reading tool at all), so over HTTP the tool must
+    return the rendered PNG itself.
+    """
+
+    def test_full_page_returns_image_and_advisory(self, indexed_db):
+        """Full-page renders must keep the crop advisory as a separate
+        text item — dropping it in HTTP mode would reintroduce the
+        agents-skip-crops failure for remote clients."""
+        with patch("pdf_search_mcp.mcp_server._HTTP_TRANSPORT", True):
+            result = run(read_page_image("basics.pdf", 1))
+        assert isinstance(result, list)
+        assert len(result) == 2
+        image, advisory = result
+        assert isinstance(image, Image)
+        assert Path(image.path).read_bytes()[:8] == _PNG_MAGIC
+        assert "Crop" in advisory
+
+    def test_region_returns_image_only(self, indexed_db):
+        """Cropped renders carry no advisory — the two-item form is
+        reserved for full-page renders that still need a crop hint."""
+        with patch("pdf_search_mcp.mcp_server._HTTP_TRANSPORT", True):
+            result = run(
+                read_page_image("basics.pdf", 1, region=[0.0, 0.0, 0.5, 0.5])
+            )
+        assert isinstance(result, Image)
+        assert Path(result.path).read_bytes()[:8] == _PNG_MAGIC
+
+    def test_error_still_plain_text(self, indexed_db):
+        """PdfSearchError must surface as text in both transports — an
+        Image-typed error would be unrenderable nonsense."""
+        with patch("pdf_search_mcp.mcp_server._HTTP_TRANSPORT", True):
+            result = run(read_page_image("nonexistent.pdf", 1))
+        assert isinstance(result, str)
+        assert "not found" in result.lower()
+
+    def test_default_flag_is_stdio_path_mode(self, indexed_db):
+        """Module default must stay False so importing the server (stdio
+        clients, tests, pydoc) never silently switches to image mode."""
+        result = run(read_page_image("basics.pdf", 1))
+        assert isinstance(result, str)
+        assert result.split("\n")[0].endswith(".png")
+
+
 # --- transport selection ---
 
 
@@ -299,6 +352,30 @@ class TestMainTransportDispatch:
                 "transport": "streamable-http",
             }
             mock_mcp.run.assert_called_once()
+
+    def test_http_enables_image_content_mode(self):
+        """main() must flip _HTTP_TRANSPORT before serving —
+        read_page_image consults it per call to pick path vs inline
+        image returns. patch.object restores the module default (False)
+        for the other tests."""
+        import pdf_search_mcp.mcp_server as srv
+
+        with patch("pdf_search_mcp.mcp_server.mcp"):
+            with patch.object(srv, "_HTTP_TRANSPORT", False):
+                with patch("sys.argv", ["pdf-search-mcp", "--transport", "http"]):
+                    main()
+                assert srv._HTTP_TRANSPORT is True
+
+    def test_stdio_keeps_path_mode(self):
+        """Plain `pdf-search-mcp` must never enable image-content mode —
+        stdio clients rely on the documented path-based return."""
+        import pdf_search_mcp.mcp_server as srv
+
+        with patch("pdf_search_mcp.mcp_server.mcp"):
+            with patch.object(srv, "_HTTP_TRANSPORT", False):
+                with patch("sys.argv", ["pdf-search-mcp"]):
+                    main()
+                assert srv._HTTP_TRANSPORT is False
 
 
 # --- stats ---

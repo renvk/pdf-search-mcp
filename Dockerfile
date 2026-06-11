@@ -1,9 +1,10 @@
 # Self-hosted deployment image: runs the MCP server over streamable
 # HTTP so clients on a trusted network can connect without installing
-# Python locally. Not needed for normal (stdio) use of the package.
+# Python locally. Not needed for the default stdio transport.
 #
 # Mount points:
-#   /pdfs  -- PDF collection (read-only mount is fine)
+#   /pdfs  -- PDF collection (may be mounted read-only; the server
+#             never writes to it)
 #   /data  -- persistent index database
 #
 # The entrypoint runs an incremental index sync on startup, then serves

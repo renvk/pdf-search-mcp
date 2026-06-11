@@ -72,7 +72,10 @@ Ask your AI agent to search your PDFs — it will use the `search`, `read_page`,
 
 ## Self-Hosted Server (HTTP)
 
-By default the server runs over stdio: each MCP client launches its own server subprocess on the same machine. For a shared setup — one indexed PDF collection served to several machines on a trusted network — run it standalone over streamable HTTP instead:
+The server has two transports:
+
+- **stdio** (default, no flags): each MCP client launches its own server subprocess on the same machine. Use this for single-machine setups.
+- **http**: one standalone server shares one indexed PDF collection with multiple clients over a trusted network:
 
 ```bash
 pdf-search-mcp --transport http --host 0.0.0.0 --port 8000
@@ -86,9 +89,11 @@ claude mcp add --transport http --scope user pdf-search http://<server>:8000/mcp
 
 > **Security:** the HTTP transport has no authentication or TLS. Run it only on trusted networks (LAN, VPN) and never expose it to the internet. The default `--host 127.0.0.1` keeps it local to the machine; binding `0.0.0.0` is an explicit opt-in.
 
+> **Limitation:** `read_page_image` returns the path of a PNG written on the server's filesystem. Clients on other machines cannot open that path. Over HTTP, `search`, `read_page`, and `stats` are fully usable; page rendering is not.
+
 ### Docker
 
-The repository includes a Dockerfile for container hosts (home servers, NAS devices). On startup the container syncs the index against the mounted PDF directory (incremental — only new, changed, and deleted files are processed) and then serves on port 8000:
+The repository includes a Dockerfile for container hosts (home servers, NAS devices). On startup the container runs an incremental index sync against the mounted PDF directory (only new, changed, and deleted files are processed) and then serves on port 8000:
 
 ```bash
 git clone https://github.com/renvk/pdf-search-mcp.git
@@ -124,7 +129,7 @@ New PDFs in the mounted directory are picked up on container restart, or immedia
 docker exec pdf-search python -m pdf_search_mcp.pdf_search index
 ```
 
-Set `PDF_SEARCH_INDEX_ON_START=0` on the container to skip the startup sync (e.g. when the index is maintained by an external job).
+Set `PDF_SEARCH_INDEX_ON_START=0` in the container environment to skip the index sync (e.g. when the index is maintained by an external job).
 
 ## CLI Usage
 

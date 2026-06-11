@@ -8,11 +8,13 @@ plain-text replies instead of protocol errors.
 
 Transports: stdio (default, one subprocess per client) and streamable
 HTTP (`--transport http`, standalone server for clients on a trusted
-network). Tool behavior is identical on both — transport selection only
-affects how clients connect, never what the tools return.
+network). search, read_page, and stats behave identically on both.
+Exception: read_page_image returns a file path on the machine running
+the server — usable over stdio (client and server share a filesystem),
+not usable by HTTP clients on other machines.
 
-The HTTP transport has no authentication. It must only be bound to
-interfaces on trusted networks (the default bind is 127.0.0.1).
+The HTTP transport has no authentication. Bind it only to interfaces
+on trusted networks (default bind: 127.0.0.1).
 
 Invariant: query preparation, relaxation, and input validation live in
 pdf_search/query — this layer adds nothing the CLI or Python API would

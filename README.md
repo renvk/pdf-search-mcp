@@ -7,6 +7,7 @@ MCP server for full-text search across PDF document collections. Built for AI ag
 - **Page rendering** — render pages as PNG for formulas, diagrams, and tables; crop to a region with auto-DPI scaling for detail shots
 - **Dual renderer** — CoreGraphics on macOS (sharper math fonts), PyMuPDF on Linux/Windows
 - **German-aware** — automatic expansion of `ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue` so both spellings match
+- **stdio or HTTP** — per-client subprocess by default, or a standalone shared server for trusted networks (Dockerfile included)
 
 ## Installation
 
@@ -68,6 +69,67 @@ Ask your AI agent to search your PDFs — it will use the `search`, `read_page`,
 |---------------------|---------|-------------|
 | `PDF_SEARCH_DIR` | *(none)* | Path to your PDF directory (required for first index, remembered after) |
 | `PDF_SEARCH_DB` | `~/.local/share/pdf-search-mcp/pdf_index.db` | Path to the SQLite database file |
+
+## Self-Hosted Server (HTTP)
+
+The server has two transports:
+
+- **stdio** (default, no flags): each MCP client launches its own server subprocess on the same machine. Use this for single-machine setups.
+- **http**: one standalone server shares one indexed PDF collection with multiple clients over a trusted network:
+
+```bash
+pdf-search-mcp --transport http --host 0.0.0.0 --port 8000
+```
+
+The MCP endpoint is `http://<server>:8000/mcp`. Connecting from Claude Code:
+
+```bash
+claude mcp add --transport http --scope user pdf-search http://<server>:8000/mcp
+```
+
+> **Security:** the HTTP transport has no authentication or TLS. Run it only on trusted networks (LAN, VPN) and never expose it to the internet. The default `--host 127.0.0.1` keeps it local to the machine; binding `0.0.0.0` is an explicit opt-in.
+
+> **Limitation:** `read_page_image` returns the path of a PNG written on the server's filesystem. Clients on other machines cannot open that path. Over HTTP, `search`, `read_page`, and `stats` are fully usable; page rendering is not.
+
+### Docker
+
+The repository includes a Dockerfile for container hosts (home servers, NAS devices). On startup the container runs an incremental index sync against the mounted PDF directory (only new, changed, and deleted files are processed) and then serves on port 8000:
+
+```bash
+git clone https://github.com/renvk/pdf-search-mcp.git
+cd pdf-search-mcp
+docker build -t pdf-search-mcp .
+docker run -d --name pdf-search \
+  -p 8000:8000 \
+  -v /path/to/pdfs:/pdfs:ro \
+  -v pdf-index:/data \
+  pdf-search-mcp
+```
+
+Or with Docker Compose:
+
+```yaml
+services:
+  pdf-search:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - /path/to/pdfs:/pdfs:ro
+      - pdf-index:/data
+    restart: unless-stopped
+
+volumes:
+  pdf-index:
+```
+
+New PDFs in the mounted directory are picked up on container restart, or immediately with:
+
+```bash
+docker exec pdf-search python -m pdf_search_mcp.pdf_search index
+```
+
+Set `PDF_SEARCH_INDEX_ON_START=0` in the container environment to skip the index sync (e.g. when the index is maintained by an external job).
 
 ## CLI Usage
 

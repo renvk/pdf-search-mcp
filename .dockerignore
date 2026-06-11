@@ -1,0 +1,11 @@
+# Keep the build context to what `pip install .` needs.
+.git
+.github
+.claude
+.venv
+dist
+build
+tests
+__pycache__
+*.egg-info
+*.db

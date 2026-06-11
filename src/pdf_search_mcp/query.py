@@ -8,8 +8,11 @@ expanded).  Digraph variants are always expanded — no language detection
 heuristic.
 
 Invariant: prepare_query() output is valid FTS5 MATCH syntax for any
-input — stray quotes are dropped, parentheses are rebalanced, and
-special characters are quoted.  Callers never need a raw-query retry.
+input — stray quotes are dropped, parentheses are rebalanced, special
+characters are quoted, and dangling AND/OR operators are trimmed.  One
+deliberate exception: NOT without a left operand (FTS5's NOT is binary)
+is passed through, because silently searching the term the user tried
+to exclude would invert their intent — the downstream error is better.
 """
 
 import re
@@ -200,11 +203,13 @@ def _prepare_near(near_expr: str) -> str:
     if not terms:
         return ""
 
-    # Variants per term: quote each variant like the original term
+    # Variants per term: quote each variant like the original term and
+    # keep the prefix star — 'Größe*' must expand to 'Groesse*', not 'Groesse'
     term_variants = []
     for t in terms:
-        bare = t.strip('"').rstrip("*").strip('"')
-        variants = [_quote_term(v) for v in _token_variants(bare)]
+        star = "*" if t.endswith("*") else ""
+        bare = t.rstrip("*").strip('"')
+        variants = [_quote_term(v + star) for v in _token_variants(bare)]
         term_variants.append([t] + [v for v in variants if v])
 
     combos = list(product(*term_variants))
@@ -219,6 +224,38 @@ def _restore_near(query: str, prepared: list[str]) -> str:
     for i, expr in enumerate(prepared):
         query = query.replace(f"__NEAR{i}__", expr)
     return query
+
+
+def _clean_operators(tokens: list[str]) -> list[str]:
+    """Drop FTS5 operators that lack an operand on either side.
+
+    Inputs: token list where operands are term tokens (including generated
+    '(... OR ...)' groups and __NEARn__ placeholders) and parens are
+    single-character tokens.
+    Returns a new list where: AND/OR with no left operand (start of query,
+    after another operator, after '(') are dropped — this also collapses
+    adjacent operators; any operator with no right operand (end of query,
+    before ')') is dropped.  NOT with a missing LEFT operand is kept on
+    purpose: dropping it would search exactly the term the user excluded.
+    """
+    cleaned = []
+    for tok in tokens:
+        if tok in ("AND", "OR") and (
+            not cleaned or cleaned[-1] in _FTS5_OPERATORS or cleaned[-1] == "("
+        ):
+            continue
+        cleaned.append(tok)
+
+    # Right-operand check runs reversed: kept[-1] is the token immediately
+    # to the right of the current one
+    kept = []
+    for tok in reversed(cleaned):
+        if tok in _FTS5_OPERATORS and (
+            not kept or kept[-1] in _FTS5_OPERATORS or kept[-1] == ")"
+        ):
+            continue
+        kept.append(tok)
+    return list(reversed(kept))
 
 
 def _balance_parens(tokens: list[str]) -> list[str]:
@@ -275,9 +312,11 @@ def prepare_query(query: str) -> str:
     searchable term survives.
 
     Steps: strip apostrophes → extract NEAR() to placeholders → tokenize →
-    quote/expand each term → rebalance parens → insert explicit AND around
-    groups (FTS5 implicit AND does not span parenthesized groups) →
-    restore NEAR() expressions.
+    quote/expand each term → rebalance parens and trim dangling operators
+    (to a fixpoint — each step can expose work for the other, e.g. dropping
+    an operator can empty a group) → insert explicit AND around groups
+    (FTS5 implicit AND does not span parenthesized groups) → restore
+    NEAR() expressions.
     """
     query = query.translate(_APOSTROPHES)
     query, saved_nears = _preserve_near(query)
@@ -298,7 +337,16 @@ def prepare_query(query: str) -> str:
         expanded = _expand_token(raw)
         if expanded:
             tokens.append(expanded)
+
+    # Fixpoint: trimming an operator can empty a group ('( OR )'), and
+    # removing an empty group can make two operators adjacent — each pass
+    # strictly shrinks the list, so this terminates
     tokens = _balance_parens(tokens)
+    while True:
+        cleaned = _balance_parens(_clean_operators(tokens))
+        if cleaned == tokens:
+            break
+        tokens = cleaned
 
     # FTS5 requires explicit AND when a parenthesized group (literal paren
     # token, generated OR-group, or NEAR placeholder — restored NEARs may

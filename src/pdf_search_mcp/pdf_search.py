@@ -579,6 +579,11 @@ def search_with_relaxation(query, limit=10):
         return results, ""
 
     terms = extract_terms(query)
+    if terms:
+        # A term that prepares to nothing (e.g. a lone '*') would leave a
+        # dangling operator in the joined sub-queries and pollute the
+        # 'Relaxed to:' note
+        terms = [t for t in terms if prepare_query(t)]
     if not terms or len(terms) < 2:
         return [], ""
 
@@ -617,9 +622,10 @@ def search_with_relaxation(query, limit=10):
 def _execute_search(prepared_query, limit):
     """Run search_pdfs, converting sqlite errors to PdfSearchError.
 
-    prepare_query() output is valid FTS5 by construction, so an
-    OperationalError here is either a concurrent-writer lock or a
-    sanitizer bug — both must surface as a clear error, never be
+    prepare_query() output is valid FTS5 by construction except for NOT
+    without a left operand (see query.py module invariant), so an
+    OperationalError here is a concurrent-writer lock, a misused NOT, or
+    a sanitizer bug — all must surface as a clear error, never be
     silently converted to 'no results'.
     """
     try:
@@ -775,13 +781,15 @@ def _compute_region_dpi(page_width_pt, page_height_pt, region, dpi_cap):
 def _validate_region(region):
     """Validate a fractional crop region, raising PdfSearchError if invalid.
 
-    Inputs: region is any sequence; valid form is [x1, y1, x2, y2] with
-    each value in 0.0–1.0, x1 < x2, and y1 < y2 (zero-area regions would
-    divide by zero in auto-DPI and produce zero-size bitmaps).
+    Inputs: region is any value; valid form is a list/tuple [x1, y1, x2, y2]
+    of numbers, each in 0.0–1.0, with x1 < x2 and y1 < y2 (zero-area regions
+    would divide by zero in auto-DPI and produce zero-size bitmaps).
+    Raises PdfSearchError for every invalid shape — including non-sequence
+    and non-numeric inputs, which must not escape as TypeError.
     """
-    if len(region) != 4:
+    if not isinstance(region, (list, tuple)) or len(region) != 4:
         raise PdfSearchError("region must be [x1, y1, x2, y2] (4 floats, each 0.0–1.0).")
-    if not all(0.0 <= v <= 1.0 for v in region):
+    if not all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in region):
         raise PdfSearchError("region values must be between 0.0 and 1.0.")
     x1, y1, x2, y2 = region
     if x1 >= x2 or y1 >= y2:
@@ -791,15 +799,23 @@ def _validate_region(region):
 def _render_output_path(filepath, page_num, dpi, region):
     """Build the deterministic output path for a rendered page.
 
-    The name is keyed by full source path (hashed — duplicate filenames in
-    different subfolders must not collide), page, DPI, and region, so a
-    repeated call can reuse the cached file. Lives in a 0o700 subdirectory
-    of the temp dir, created on first use.
+    The name is keyed by full source path and FULL-PRECISION region (both
+    hashed — duplicate filenames must not collide, and nearby regions like
+    0.100 vs 0.104 must not share a cache slot), plus page and DPI, so a
+    repeated call can reuse the cached file. The 2-decimal region tag is
+    only for human orientation. Lives in a 0o700 subdirectory of the temp
+    dir, created on first use.
+
+    Raises PdfSearchError when the directory cannot be created (e.g. a
+    foreign-owned leftover on a shared machine).
     """
     out_dir = Path(tempfile.gettempdir()) / "pdf-search-mcp"
-    out_dir.mkdir(mode=0o700, exist_ok=True)
+    try:
+        out_dir.mkdir(mode=0o700, exist_ok=True)
+    except OSError as e:
+        raise PdfSearchError(f"Cannot create render directory {out_dir}: {e}") from e
     safe_name = re.sub(r"[^\w\-.]", "_", filepath.name)
-    path_tag = sha1(str(filepath).encode("utf-8")).hexdigest()[:8]
+    path_tag = sha1(f"{filepath}|{region!r}".encode("utf-8")).hexdigest()[:8]
     if region is not None:
         r_tag = "_r" + "_".join(f"{v:.2f}" for v in region)
     else:
@@ -831,12 +847,14 @@ def render_pdf_page(filename, page_num, dpi=140, subfolder=None, region=None):
 
     Raises:
         PdfSearchError: If file not found, ambiguous, unreadable, page out
-            of range, dpi < 1, or region invalid.
+            of range, region invalid, dpi < 1 (full-page renders only —
+            dpi is documented as ignored when region is set), or the
+            output file cannot be written.
     """
-    if dpi < 1:
-        raise PdfSearchError("dpi must be a positive integer.")
     if region is not None:
         _validate_region(region)
+    elif dpi < 1:
+        raise PdfSearchError("dpi must be a positive integer.")
 
     filepath = _resolve_pdf_path(filename, subfolder)
 
@@ -879,7 +897,7 @@ def render_pdf_page(filename, page_num, dpi=140, subfolder=None, region=None):
                 raise PdfSearchError(
                     f"Render failed for '{filename}' p.{page_num}: {e}"
                 ) from e
-            out.write_bytes(png_bytes)
+            _write_render(out, lambda: out.write_bytes(png_bytes))
         else:
             if region is not None:
                 x1, y1, x2, y2 = region
@@ -892,9 +910,22 @@ def render_pdf_page(filename, page_num, dpi=140, subfolder=None, region=None):
                 pix = page.get_pixmap(dpi=effective_dpi, clip=clip)
             else:
                 pix = page.get_pixmap(dpi=effective_dpi)
-            pix.save(str(out))
+            _write_render(out, lambda: pix.save(str(out)))
 
     return out
+
+
+def _write_render(out, write):
+    """Run a render-output write, converting OSError to PdfSearchError.
+
+    A foreign-owned temp directory or full disk raises PermissionError/
+    OSError, which would escape the PdfSearchError-only handlers in the
+    MCP tools as a protocol error.
+    """
+    try:
+        write()
+    except OSError as e:
+        raise PdfSearchError(f"Cannot write rendered image {out}: {e}") from e
 
 
 def index_stats():

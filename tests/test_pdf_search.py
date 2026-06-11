@@ -317,6 +317,15 @@ class TestSearchWithRelaxation:
         with pytest.raises(PdfSearchError, match="no searchable terms"):
             search_with_relaxation("()", 10)
 
+    def test_unsearchable_term_does_not_break_relaxation(self, indexed_db):
+        """PR-review issue 1: 'xyznonexistent *' built the OR fallback as
+        'xyznonexistent OR' (the lone '*' prepares to nothing) and raised
+        a syntax error quoting a query the user never typed. It must
+        degrade to plain no-results."""
+        results, note = search_with_relaxation("xyznonexistent *", 10)
+        assert results == []
+        assert note == ""
+
     def test_invalid_fts5_surfaces_as_pdf_search_error(self, indexed_db):
         """'NOT term' is invalid FTS5 (NOT is binary). The error must
         surface as PdfSearchError, never as silent zero results — masking
@@ -450,6 +459,22 @@ class TestRenderPdfPage:
         with pytest.raises(PdfSearchError, match="x1 must be < x2"):
             render_pdf_page("basics.pdf", 1, region=[0.5, 0.5, 0.5, 0.5])
 
+    def test_non_sequence_region_raises_pdf_search_error(self, indexed_db):
+        """Review minor: a non-sequence region raised TypeError from len()
+        via the Python API; the docstring promises PdfSearchError."""
+        with pytest.raises(PdfSearchError, match="4 floats"):
+            render_pdf_page("basics.pdf", 1, region=0.5)
+
+    def test_non_numeric_region_raises_pdf_search_error(self, indexed_db):
+        with pytest.raises(PdfSearchError, match="between 0.0 and 1.0"):
+            render_pdf_page("basics.pdf", 1, region=[0.0, "a", 0.5, 0.5])
+
+    def test_zero_dpi_ignored_when_region_set(self, indexed_db):
+        """dpi is documented as ignored for region renders — a bad dpi
+        value must not reject a call that never uses it."""
+        path = render_pdf_page("basics.pdf", 1, dpi=0, region=[0.0, 0.0, 0.5, 0.5])
+        assert path.exists()
+
     def test_region_out_of_bounds_raises(self, indexed_db):
         with pytest.raises(PdfSearchError, match="between 0.0 and 1.0"):
             render_pdf_page("basics.pdf", 1, region=[0.0, 0.0, 0.5, 1.5])
@@ -508,6 +533,15 @@ class TestRenderPdfPage:
         path2 = render_pdf_page("basics.pdf", 1)
         assert path1 == path2
         assert path2.stat().st_mtime_ns == mtime1
+
+    def test_nearby_regions_get_distinct_cache_paths(self, indexed_db):
+        """PR-review issue 2: regions differing only past the 2nd decimal
+        (0.100 vs 0.104) rounded to the same filename, and the cache-hit
+        early return then served the first crop's pixels for the second
+        region. The path now hashes full-precision coordinates."""
+        path_a = render_pdf_page("basics.pdf", 1, region=[0.100, 0.1, 0.5, 0.5])
+        path_b = render_pdf_page("basics.pdf", 1, region=[0.104, 0.1, 0.5, 0.5])
+        assert path_a != path_b
 
 
 # --- Compute Region DPI ---

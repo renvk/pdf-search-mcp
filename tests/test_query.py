@@ -354,6 +354,17 @@ class TestPrepareQueryAlwaysValidFts5:
         "((a) (b",                          # nested unbalanced groups
         ")(",                               # pure noise
         "a -b +c ^d",                       # FTS5 metacharacters
+        # PR-review round 2: dangling operators (each rejected by FTS5 before)
+        "pressure AND",                     # trailing operator after expansion group
+        "OR pressure",                      # leading operator
+        "a OR (",                           # operator left dangling by paren repair
+        "a OR NEAR(, 5)",                   # operator left dangling by empty-NEAR drop
+        "xyznonexistent *",                 # term that prepares to nothing -> dangling OR in relaxation
+        "a AND OR b",                       # adjacent operators
+        "( OR )",                           # operator-only group
+        "a NOT",                            # NOT with no right operand
+        "a AND ( OR ) AND b",               # group emptied by operator trim -> adjacent ANDs
+        ") OR a",                           # stray closer exposing a leading operator
     ]
 
     @pytest.mark.parametrize("raw", CASES)
@@ -373,3 +384,27 @@ class TestPrepareQueryAlwaysValidFts5:
         """Bug #Q6: FTS5 rejects 'term (group)' — explicit AND required."""
         result = prepare_query("nozzle NEAR(Schlüssel weite, 5)")
         assert "nozzle AND (" in result
+
+    def test_trailing_operator_trimmed(self):
+        """'pressure AND' previously expanded to '(...) AND' — rejected."""
+        assert prepare_query("pressure AND") == "(pressure OR preßure)"
+
+    def test_leading_operator_trimmed(self):
+        assert prepare_query("OR bolt") == "bolt"
+
+    def test_adjacent_operators_collapsed(self):
+        assert prepare_query("bolt AND OR flange") == "bolt AND flange"
+
+    def test_leading_not_passed_through(self):
+        """NOT without a left operand is the documented invariant exception:
+        trimming it would search exactly the term the user excluded, so it
+        is passed through and rejected downstream with a clear error."""
+        result = prepare_query("NOT bolt")
+        assert result.startswith("NOT")
+        assert not _fts5_accepts(result)
+
+    def test_near_prefix_star_kept_in_variants(self):
+        """Review minor: German variants inside NEAR dropped the prefix
+        star ('Größe*' expanded to 'Groesse' instead of 'Groesse*')."""
+        result = _prepare_near("NEAR(Größe* test, 5)")
+        assert "Groesse*" in result

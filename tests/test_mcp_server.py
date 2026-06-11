@@ -93,6 +93,13 @@ class TestSearchRelaxation:
         result = run(search("qqq zzz"))
         assert result == "No results found."
 
+    def test_unsearchable_term_degrades_to_no_results(self, indexed_db):
+        """PR-review issue 1 end-to-end: 'xyznonexistent *' previously
+        returned 'Search failed for query ... OR: fts5: syntax error'
+        quoting a query the user never typed."""
+        result = run(search("xyznonexistent *"))
+        assert result == "No results found."
+
     def test_german_expansion_through_tool(self, indexed_db):
         """'Aussendurchmesser' must find the page containing
         'Außendurchmesser' (reverse expansion replaces one digraph

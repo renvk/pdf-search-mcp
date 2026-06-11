@@ -106,7 +106,7 @@ Uses [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
 | Prefix | `concur*` | Prefix matching |
 | NEAR | `NEAR(load balancer, 10)` | Terms within 10 tokens of each other |
 
-**Auto-quoting:** Terms containing any special character (dots, hyphens, commas, slashes, colons, ...) are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`, `1:100` becomes `"1:100"`) because FTS5 treats these as token separators or operators. Query preparation guarantees valid FTS5 syntax for any input — stray quotes are dropped and unbalanced parentheses are repaired.
+**Auto-quoting:** Terms containing any special character (dots, hyphens, commas, slashes, colons, ...) are automatically quoted (e.g., `ISO-27001` becomes `"ISO-27001"`, `1:100` becomes `"1:100"`) because FTS5 treats these as token separators or operators. Query preparation guarantees valid FTS5 syntax — stray quotes are dropped, unbalanced parentheses are repaired, and dangling AND/OR operators are trimmed. The one exception is `NOT` without a left operand (FTS5's `NOT` is binary): it is passed through and returns a clear error, because silently searching the excluded term would invert the query's meaning.
 
 **German expansion:** Umlauts and eszett are automatically expanded to their digraph equivalents and vice versa (`ß↔ss`, `ä↔ae`, `ö↔oe`, `ü↔ue`). Searching for `Größe` also finds `Groesse`, and `Weißbuch` also finds `Weissbuch`. Reverse expansion (`ss`→`ß`) replaces one position at a time. Expansion also applies inside `NEAR()` expressions.
 

@@ -273,8 +273,18 @@ class TestMainTransportDispatch:
     def test_http_sets_bind_address_and_transport(self):
         """--host/--port must land in mcp.settings BEFORE run() — FastMCP
         reads the bind address from settings, not from run() arguments,
-        so passing them any other way is silently ignored."""
+        so passing them any other way is silently ignored. The snapshot
+        side_effect pins the ordering: asserting on the mock after main()
+        returned would also pass if settings were assigned too late."""
         with patch("pdf_search_mcp.mcp_server.mcp") as mock_mcp:
+            at_run_time = {}
+
+            def snapshot(transport=None):
+                at_run_time["host"] = mock_mcp.settings.host
+                at_run_time["port"] = mock_mcp.settings.port
+                at_run_time["transport"] = transport
+
+            mock_mcp.run.side_effect = snapshot
             argv = [
                 "pdf-search-mcp",
                 "--transport", "http",
@@ -283,9 +293,12 @@ class TestMainTransportDispatch:
             ]
             with patch("sys.argv", argv):
                 main()
-            assert mock_mcp.settings.host == "0.0.0.0"
-            assert mock_mcp.settings.port == 9000
-            mock_mcp.run.assert_called_once_with(transport="streamable-http")
+            assert at_run_time == {
+                "host": "0.0.0.0",
+                "port": 9000,
+                "transport": "streamable-http",
+            }
+            mock_mcp.run.assert_called_once()
 
 
 # --- stats ---

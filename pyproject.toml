@@ -14,7 +14,9 @@ license = "MIT"
 authors = [{name = "ren", email = "ren@virku.ai"}]
 dependencies = [
     "PyMuPDF>=1.24.0",
-    "mcp>=1.0.0",
+    # >=1.8.0: first SDK release where FastMCP.run() accepts
+    # transport="streamable-http" (1.7.x only knows stdio/sse)
+    "mcp>=1.8.0",
     "anyio>=4.0",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]

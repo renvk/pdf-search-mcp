@@ -89,7 +89,7 @@ claude mcp add --transport http --scope user pdf-search http://<server>:8000/mcp
 
 > **Security:** the HTTP transport has no authentication or TLS. Run it only on trusted networks (LAN, VPN) and never expose it to the internet. The default `--host 127.0.0.1` keeps it local to the machine; binding `0.0.0.0` is an explicit opt-in.
 
-> **Limitation:** `read_page_image` returns the path of a PNG written on the server's filesystem. Clients on other machines cannot open that path. Over HTTP, `search`, `read_page`, and `stats` are fully usable; page rendering is not.
+> **Note:** over HTTP, `read_page_image` returns the rendered PNG as inline MCP image content, so page rendering works for clients on other machines (including clients without filesystem access, such as Claude Desktop). Over stdio it returns a file path for the client to open, as before.
 
 ### Docker
 

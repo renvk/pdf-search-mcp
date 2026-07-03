@@ -32,10 +32,11 @@ class TestNormalizeText:
         """FTS5's unicode61 tokenizer does not fold ligature codepoints —
         without decomposition, 'eﬃciency' never matches the query
         'efficiency'. All seven Alphabetic Presentation Forms ligatures
-        must decompose."""
+        must decompose; U+FB05 (long s + t) folds to 'st' like U+FB06,
+        because NFKD maps long s (ſ) to s."""
         assert (
             _normalize_text("high eﬃciency ﬂow deﬁne oﬀset waﬄe ﬅill ﬆop")
-            == "high efficiency flow define offset waffle ftill stop"
+            == "high efficiency flow define offset waffle still stop"
         )
 
     def test_joins_hyphenated_line_break(self):
@@ -91,6 +92,25 @@ class TestNormalizeText:
         Both orderings around the printed hyphen must join."""
         assert _normalize_text("is ex\u00ad-\npressed as") == "is expressed as"
         assert _normalize_text("is ex-\u00ad\npressed as") == "is expressed as"
+
+    def test_joins_single_char_fragment_chains(self):
+        """A join consumes its continuation character, so 'a-/b-/c' style
+        chains (OCR junk in scanned tables) leave a residual joinable
+        break after one regex pass. The loop-to-fixpoint must finish the
+        job — and thereby keep _normalize_text idempotent, or
+        index_quality would flag freshly indexed junk pages as stale
+        forever, with 'run reindex' advice that can never clear them."""
+        assert _normalize_text("a-\nb-\nc") == "abc"
+        once = _normalize_text("x-\ny-\nz-\nw")
+        assert _normalize_text(once) == once
+
+    def test_glues_lowercase_hyphenated_compounds(self):
+        """Documented tradeoff, pinned so any change is deliberate: a
+        genuine hyphenated compound wrapping at its hyphen with a
+        lowercase continuation is indistinguishable from a split word,
+        so the join rule glues it. Split words vastly outnumber wrapped
+        compounds in this corpus, so recall favors joining."""
+        assert _normalize_text("the cross-\nsection area") == "the crosssection area"
 
     def test_plain_text_unchanged(self):
         """Text with none of the three defects must pass through

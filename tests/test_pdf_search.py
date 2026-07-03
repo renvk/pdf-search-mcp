@@ -86,7 +86,7 @@ class TestNormalizeText:
     def test_soft_hyphen_adjacent_to_hyphen_break(self):
         """Publisher PDFs emit a soft hyphen next to the printed hyphen at
         a line break ('ex', U+00AD, '-', newline — observed byte-for-byte
-        in Cengel-Cimbala). Stripping soft hyphens after the join regex
+        in real publisher PDFs). Stripping soft hyphens after the join regex
         leaves the fresh '-\n' unjoined, so the strip must run first.
         Both orderings around the printed hyphen must join."""
         assert _normalize_text("is ex\u00ad-\npressed as") == "is expressed as"

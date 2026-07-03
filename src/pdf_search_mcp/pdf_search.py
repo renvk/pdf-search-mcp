@@ -146,13 +146,18 @@ def _normalize_text(text):
 
     Returns:
         Text (str) with typographic ligatures decomposed (ﬃ → ffi),
-        line-break hyphenation joined when the continuation is lowercase,
-        and soft hyphens (U+00AD) removed. Does not touch layout
+        soft hyphens (U+00AD) removed, and line-break hyphenation joined
+        when the continuation is lowercase. Does not touch layout
         whitespace beyond the newlines consumed by joined hyphen breaks.
     """
     text = text.translate(_LIGATURES)
-    text = _HYPHEN_BREAK_RE.sub(_join_hyphen_break, text)
-    return text.replace("\u00ad", "")
+    # Soft hyphens must be stripped BEFORE the hyphen-break join:
+    # publisher PDFs emit the soft hyphen adjacent to the printed hyphen
+    # ('ex', U+00AD, '-', newline), which breaks the letter/'-'/newline
+    # adjacency the join regex requires — stripping afterwards leaves
+    # the break unjoined and the split word unsearchable.
+    text = text.replace("\u00ad", "")
+    return _HYPHEN_BREAK_RE.sub(_join_hyphen_break, text)
 
 
 def _extract_text(page):

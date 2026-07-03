@@ -151,6 +151,10 @@ python -m pdf_search_mcp.pdf_search read filename.pdf 5
 # Show index statistics
 python -m pdf_search_mcp.pdf_search stats
 
+# Report extraction-quality problems (scanned files needing OCR,
+# stale normalization, broken font mappings, near-empty pages)
+python -m pdf_search_mcp.pdf_search quality
+
 # Rebuild index from scratch (path remembered)
 python -m pdf_search_mcp.pdf_search reindex
 ```

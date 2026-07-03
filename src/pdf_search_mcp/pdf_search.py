@@ -30,6 +30,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from collections import Counter
 from contextlib import contextmanager
 from hashlib import sha1
 from pathlib import Path
@@ -1054,6 +1055,90 @@ def index_stats():
     }
 
 
+# Pages whose stripped text is shorter than this count as near-empty in
+# index_quality. Thin text layers (a lone header word on a scanned page,
+# 1970s OCR junk) and figure-only pages fall under it; real prose pages
+# do not. 50 chars is under one line of body text.
+_NEAR_EMPTY_CHARS = 50
+
+# Worst-offender lists in index_quality are capped at this many files —
+# enough to identify the problem documents without flooding the report.
+_QUALITY_TOP_N = 10
+
+
+def index_quality():
+    """Scan the indexed text for extraction-quality problems.
+
+    Reads only stored page text (no PDF files are opened), so the report
+    reflects exactly what search queries match and read_page returns.
+    Each metric points at a distinct remedy: files without text need OCR;
+    stale-normalization pages need a 'reindex'; replacement-character and
+    near-empty pages are only usable via read_page_image.
+
+    Returns:
+        Dict with keys:
+        - total_files (int), total_pages (int)
+        - files_without_text: list of (file, subfolder) tuples with no
+          indexed pages — scanned PDFs without a text layer.
+        - pages_stale_normalization (int): pages whose stored text is not
+          a fixed point of _normalize_text — the index predates the
+          current normalization rules.
+        - pages_replacement_char (int): pages containing U+FFFD (font
+          without a usable Unicode mapping; text is unrecoverable).
+        - pages_near_empty (int): pages with fewer than _NEAR_EMPTY_CHARS
+          characters after strip().
+        - worst_stale, worst_replacement, worst_near_empty: lists of
+          ((file, subfolder), page_count), largest first, at most
+          _QUALITY_TOP_N entries each.
+
+    Raises:
+        PdfSearchError: If no index exists or it is invalid/outdated.
+    """
+    stale = Counter()
+    replacement = Counter()
+    near_empty = Counter()
+
+    with _open_index() as conn:
+        total_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        total_pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+
+        files_without_text = [
+            (row["file"], row["subfolder"])
+            for row in conn.execute(
+                """
+                SELECT f.file, f.subfolder FROM files f
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pages p
+                    WHERE p.file = f.file AND p.subfolder = f.subfolder
+                )
+                ORDER BY f.subfolder, f.file
+                """
+            )
+        ]
+
+        for row in conn.execute("SELECT file, subfolder, content FROM pages"):
+            key = (row["file"], row["subfolder"])
+            content = row["content"]
+            if _normalize_text(content) != content:
+                stale[key] += 1
+            if "�" in content:
+                replacement[key] += 1
+            if len(content.strip()) < _NEAR_EMPTY_CHARS:
+                near_empty[key] += 1
+
+    return {
+        "total_files": total_files,
+        "total_pages": total_pages,
+        "files_without_text": files_without_text,
+        "pages_stale_normalization": sum(stale.values()),
+        "pages_replacement_char": sum(replacement.values()),
+        "pages_near_empty": sum(near_empty.values()),
+        "worst_stale": stale.most_common(_QUALITY_TOP_N),
+        "worst_replacement": replacement.most_common(_QUALITY_TOP_N),
+        "worst_near_empty": near_empty.most_common(_QUALITY_TOP_N),
+    }
+
+
 def reindex_pdfs(pdf_dir=None):
     """Drop and rebuild the index.
 
@@ -1090,6 +1175,7 @@ def _cli():
         print("  search <query> [limit]    Search indexed PDFs")
         print("  read   <file> <page> [sub] Read full page text")
         print("  stats                     Show index statistics")
+        print("  quality                   Report extraction-quality problems")
         print("  reindex [pdf_dir]         Drop and rebuild index")
         print()
         print("Environment variables:")
@@ -1163,6 +1249,32 @@ def _cli():
             print(f"  Subfolders:")
             for name, cnt in info["subfolders"].items():
                 print(f"    {name or '(root)':30s} {cnt:4d} files")
+
+        elif cmd == "quality":
+            q = index_quality()
+            print("Extraction quality report:")
+            print(f"  Files:                              {q['total_files']}")
+            print(f"  Pages:                              {q['total_pages']}")
+            print(f"  Files without text (need OCR):      {len(q['files_without_text'])}")
+            print(f"  Pages not normalized (run reindex): {q['pages_stale_normalization']}")
+            print(f"  Pages with U+FFFD (broken fonts):   {q['pages_replacement_char']}")
+            print(f"  Near-empty pages (<{_NEAR_EMPTY_CHARS} chars):        {q['pages_near_empty']}")
+            if q["files_without_text"]:
+                print("  Files without text:")
+                for fname, sub in q["files_without_text"][:20]:
+                    print(f"    {sub + '/' if sub else ''}{fname}")
+                remaining = len(q["files_without_text"]) - 20
+                if remaining > 0:
+                    print(f"    ... and {remaining} more")
+            for title, worst in [
+                ("Stale normalization", q["worst_stale"]),
+                ("U+FFFD", q["worst_replacement"]),
+                ("Near-empty", q["worst_near_empty"]),
+            ]:
+                if worst:
+                    print(f"  {title} — worst files (pages):")
+                    for (fname, sub), cnt in worst:
+                        print(f"    {cnt:5d}  {sub + '/' if sub else ''}{fname}")
 
         elif cmd == "reindex":
             pdf_dir = sys.argv[2] if len(sys.argv) > 2 else None

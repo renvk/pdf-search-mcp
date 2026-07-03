@@ -14,6 +14,7 @@ from pdf_search_mcp.pdf_search import (
     _density_components,
     _normalize_text,
     index_pdfs,
+    index_quality,
     index_stats,
     read_pdf_page,
     reindex_pdfs,
@@ -512,6 +513,78 @@ class TestDuplicateResolution:
         """Non-duplicated files keep resolving without a subfolder."""
         text = read_pdf_page("basics.pdf", 1)
         assert "pressure vessels" in text
+
+
+# --- Quality report ---
+
+
+class TestIndexQuality:
+    def test_clean_index_reports_no_defects(self, indexed_db):
+        """A freshly indexed set of born-clean fixtures must report zero
+        stale-normalization and zero replacement-char pages — false
+        positives here would send users on pointless reindex/OCR runs."""
+        q = index_quality()
+        assert q["files_without_text"] == []
+        assert q["pages_stale_normalization"] == 0
+        assert q["pages_replacement_char"] == 0
+
+    def test_reports_files_without_text(self, temp_db, sample_pdfs):
+        """A scanned (image-only) PDF has a files row but no pages rows —
+        the report must list it as an OCR candidate."""
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.draw_rect(fitz.Rect(50, 50, 200, 200), color=(0, 0, 0), fill=(1, 0, 0))
+        doc.save(str(sample_pdfs / "imageonly.pdf"))
+        doc.close()
+        index_pdfs(str(sample_pdfs))
+        q = index_quality()
+        assert ("imageonly.pdf", "") in q["files_without_text"]
+
+    def test_detects_stale_normalization(self, indexed_db):
+        """Pages indexed before a normalization change are not fixed
+        points of _normalize_text — the report must count them so the
+        user knows a reindex is due. Simulated by inserting a ligature
+        page directly, as an old index version would have stored it."""
+        db_path, _ = indexed_db
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
+            ("stale.pdf", "", 1, "high eﬃciency flow measurement values"),
+        )
+        conn.commit()
+        conn.close()
+        q = index_quality()
+        assert q["pages_stale_normalization"] == 1
+        assert (("stale.pdf", ""), 1) in q["worst_stale"]
+
+    def test_detects_replacement_char(self, indexed_db):
+        """U+FFFD marks fonts without a usable Unicode mapping — the text
+        is unrecoverable and only read_page_image helps, so the report
+        must surface these pages."""
+        db_path, _ = indexed_db
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
+            ("broken.pdf", "", 1, "some text with �� broken glyph mapping here"),
+        )
+        conn.commit()
+        conn.close()
+        q = index_quality()
+        assert q["pages_replacement_char"] == 1
+
+    def test_counts_near_empty_pages(self, temp_db, make_pdf, tmp_path):
+        """A page whose text layer is a lone word (thin OCR layer on a
+        scan, figure-only page) is unusable for search — counted under
+        the 50-char near-empty threshold."""
+        pdfs = tmp_path / "thin_pdfs"
+        pdfs.mkdir()
+        make_pdf(pdfs / "thin.pdf", "Vornorm")
+        index_pdfs(str(pdfs))
+        q = index_quality()
+        assert q["pages_near_empty"] == 1
+        assert (("thin.pdf", ""), 1) in q["worst_near_empty"]
 
 
 # --- Image-only PDFs ---

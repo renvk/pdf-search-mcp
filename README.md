@@ -218,9 +218,11 @@ png_path = render_pdf_page("document.pdf", 42, region=[0.0, 0.5, 1.0, 0.8])
 
 ## How It Works
 
-1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed, each committed individually so an interrupted run resumes where it stopped. Only page content is searchable — filenames, subfolders, and page numbers are stored as unindexed metadata so query terms cannot match them. Directories starting with `_` are skipped.
+1. **Indexing** incrementally syncs your PDF directory into a SQLite FTS5 virtual table. On first run, all PDFs are indexed. On subsequent runs, only new, changed (by mtime/size), and deleted files are processed, each committed individually so an interrupted run resumes where it stopped. Only page content is searchable — filenames, subfolders, and page numbers are stored as unindexed metadata so query terms cannot match them. Directories starting with `_` are skipped. Extracted text is normalized before indexing: typographic ligatures are decomposed (`eﬃciency` → `efficiency`), words split by line-break hyphenation are rejoined (`Druckbehäl-`/`ter` → `Druckbehälter`, only when the continuation is lowercase so genuine hyphenated compounds keep their hyphen), and invisible soft hyphens are removed — without this, none of those words would ever match a query. `read_page` applies the same normalization, so the text you read is exactly the text that was searched.
 
 > **Upgrading to 0.3.0:** the FTS5 schema changed (metadata columns are no longer searchable). Existing indexes are detected and refused with a clear error — run `python -m pdf_search_mcp.pdf_search reindex` once to rebuild.
+
+> **Text normalization:** indexes built before normalization was introduced keep working, but their stored text is unnormalized until you run `python -m pdf_search_mcp.pdf_search reindex` once.
 
 2. **Searching** runs FTS5 MATCH queries and re-ranks results by combining BM25 relevance with match density — pages where search terms cluster together score higher than pages with the same terms scattered throughout. The density signal blends term concentration (matches per character) and spatial clustering (how tightly grouped the matches are).
 

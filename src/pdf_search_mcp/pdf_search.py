@@ -10,6 +10,10 @@ Invariants:
       subfolder, and page are UNINDEXED so query terms never match
       filenames or page numbers (schema v2 — older indexes must be
       rebuilt with 'reindex').
+    - Extracted text is normalized identically for indexing and
+      read_pdf_page (see _normalize_text), so the text agents read is
+      exactly the text queries matched. Changing the normalization
+      requires a full 'reindex' to take effect on existing indexes.
     - Filenames and subfolders are stored NFC-normalized; lookups
       normalize their inputs the same way.
     - Each file is committed individually during indexing, so a crash
@@ -89,6 +93,82 @@ _MAX_RENDER_EDGE_PX = 1568
 # so higher DPI only adds detail within that pixel budget — the cap bounds
 # render time for tiny crops.
 _MAX_REGION_DPI = 2500
+
+# Typographic ligature codepoints mapped to their letter sequences.
+# FTS5's unicode61 tokenizer does not fold these, so a page containing
+# 'eﬃciency' can never match the query 'efficiency' unless the ligature
+# is decomposed before indexing.
+_LIGATURES = {
+    0xFB00: "ff",
+    0xFB01: "fi",
+    0xFB02: "fl",
+    0xFB03: "ffi",
+    0xFB04: "ffl",
+    0xFB05: "ft",
+    0xFB06: "st",
+}
+
+# Line-end hyphenation: a letter, then '-' and a newline, then a word
+# character. _join_hyphen_break joins the fragments only when the
+# continuation is lowercase — a word split by line-break hyphenation
+# continues lowercase ('Druckbehäl-/ter'), while a genuine hyphenated
+# compound continues with a capital or a digit ('AD 2000-/Merkblatt')
+# and must keep its hyphen.
+_HYPHEN_BREAK_RE = re.compile(r"([^\W\d_])-\n(\w)")
+
+
+def _join_hyphen_break(match):
+    """re.sub callback for _HYPHEN_BREAK_RE: join iff continuation is lowercase.
+
+    Args:
+        match: Match with group 1 = letter before '-', group 2 = first
+            character after the newline.
+
+    Returns:
+        The two characters joined (hyphen and newline dropped) when
+        group 2 is a lowercase letter, else the match unchanged.
+    """
+    return (
+        match.group(1) + match.group(2)
+        if match.group(2).islower()
+        else match.group(0)
+    )
+
+
+def _normalize_text(text):
+    """Normalize extracted page text for indexing and reading.
+
+    Pure function — must be applied identically wherever page text is
+    produced (module invariant), and any change requires a 'reindex'.
+
+    Args:
+        text: Raw text from fitz get_text() (str).
+
+    Returns:
+        Text (str) with typographic ligatures decomposed (ﬃ → ffi),
+        line-break hyphenation joined when the continuation is lowercase,
+        and soft hyphens (U+00AD) removed. Does not touch layout
+        whitespace beyond the newlines consumed by joined hyphen breaks.
+    """
+    text = text.translate(_LIGATURES)
+    text = _HYPHEN_BREAK_RE.sub(_join_hyphen_break, text)
+    return text.replace("\u00ad", "")
+
+
+def _extract_text(page):
+    """Extract normalized plain text from one fitz page.
+
+    The single extraction path shared by indexing and read_pdf_page —
+    both must see byte-identical text or search hits and page reads
+    would disagree.
+
+    Args:
+        page: An open fitz.Page.
+
+    Returns:
+        Normalized page text (str, see _normalize_text).
+    """
+    return _normalize_text(page.get_text())
 
 
 def _density_components(highlighted):
@@ -308,7 +388,7 @@ def _index_single_pdf(conn, filepath, fname_nfc, subfolder):
     pages_added = 0
     with fitz.open(str(filepath)) as doc:
         for page_num in range(len(doc)):
-            text = doc[page_num].get_text()
+            text = _extract_text(doc[page_num])
             if text.strip():
                 conn.execute(
                     "INSERT INTO pages (file, subfolder, page, content) VALUES (?, ?, ?, ?)",
@@ -749,7 +829,7 @@ def read_pdf_page(filename, page_num, subfolder=None):
 
     with _open_doc(filepath) as doc:
         _validate_page(doc, page_num)
-        return doc[page_num - 1].get_text()
+        return _extract_text(doc[page_num - 1])
 
 
 def _compute_region_dpi(page_width_pt, page_height_pt, region, dpi_cap):

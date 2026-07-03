@@ -12,6 +12,7 @@ from pdf_search_mcp.pdf_search import (
     _MAX_RENDER_EDGE_PX,
     _compute_region_dpi,
     _density_components,
+    _normalize_text,
     index_pdfs,
     index_stats,
     read_pdf_page,
@@ -20,6 +21,114 @@ from pdf_search_mcp.pdf_search import (
     search_pdfs,
     search_with_relaxation,
 )
+
+
+# --- Text normalization ---
+
+
+class TestNormalizeText:
+    def test_decomposes_ligatures(self):
+        """FTS5's unicode61 tokenizer does not fold ligature codepoints —
+        without decomposition, 'eﬃciency' never matches the query
+        'efficiency'. All seven Alphabetic Presentation Forms ligatures
+        must decompose."""
+        assert (
+            _normalize_text("high eﬃciency ﬂow deﬁne oﬀset waﬄe ﬅill ﬆop")
+            == "high efficiency flow define offset waffle ftill stop"
+        )
+
+    def test_joins_hyphenated_line_break(self):
+        """A word split by line-break hyphenation is indexed as two junk
+        tokens ('Druckbehäl' + 'ter') — the query 'Druckbehälter' misses
+        it. Lowercase continuation marks a split word, so the fragments
+        are joined and the consumed newline collapses the two lines."""
+        assert (
+            _normalize_text("Der Druckbehäl-\nter ist geprüft.")
+            == "Der Druckbehälter ist geprüft."
+        )
+
+    def test_joins_consecutive_hyphen_breaks(self):
+        """A long compound can wrap twice; sequential re.sub scanning must
+        join both breaks, not just the first."""
+        assert (
+            _normalize_text("Wärmeübertra-\ngungsflä-\nche")
+            == "Wärmeübertragungsfläche"
+        )
+
+    def test_keeps_hyphen_before_uppercase(self):
+        """'AD 2000-\\nMerkblatt' is a genuine hyphenated compound wrapped
+        at its hyphen — joining would create the junk token
+        '2000Merkblatt'. Uppercase continuation must keep the hyphen
+        (and the line break) intact."""
+        text = "Das AD 2000-\nMerkblatt B1 gilt."
+        assert _normalize_text(text) == text
+
+    def test_keeps_hyphen_before_digit(self):
+        """Standard designations wrap at their hyphen with a digit
+        continuation ('EN 13445-\\n3') — digits are not lowercase, so the
+        hyphen must survive."""
+        text = "Nach EN 13445-\n3 berechnet."
+        assert _normalize_text(text) == text
+
+    def test_keeps_hyphen_after_digit(self):
+        """A digit before the hyphen ('2000-\\nter') cannot be a split
+        word — group 1 requires a letter, so nothing is joined even
+        though the continuation is lowercase."""
+        text = "Ausgabe 2000-\nter Teil."
+        assert _normalize_text(text) == text
+
+    def test_strips_soft_hyphens(self):
+        """Soft hyphens (U+00AD) are invisible in print but split FTS5
+        tokens — 'Druck\\u00adbehälter' never matches 'Druckbehälter'."""
+        assert _normalize_text("Druck­behälter") == "Druckbehälter"
+
+    def test_plain_text_unchanged(self):
+        """Text with none of the three defects must pass through
+        byte-identical — normalization must not touch layout whitespace."""
+        text = "This is a test document.\nSecond line with Größe.\n"
+        assert _normalize_text(text) == text
+
+
+class TestNormalizationEndToEnd:
+    @pytest.fixture
+    def hyphenated_pdf_dir(self, tmp_path):
+        """One PDF whose page text wraps 'Druckbehälter' across two lines
+        with a hyphen — two insert_text calls 14pt apart extract as
+        'Druckbehäl-\\nter' (verified against PyMuPDF), reproducing real
+        line-break hyphenation."""
+        import fitz
+
+        pdfs_dir = tmp_path / "hyphen_pdfs"
+        pdfs_dir.mkdir()
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Der Druckbehäl-")
+        page.insert_text((72, 86), "ter ist geprüft.")
+        doc.save(str(pdfs_dir / "hyphen.pdf"))
+        doc.close()
+        return pdfs_dir
+
+    def test_search_finds_dehyphenated_compound(self, temp_db, hyphenated_pdf_dir):
+        """The whole point of dehyphenation: the joined compound must be
+        findable by full-text search."""
+        index_pdfs(str(hyphenated_pdf_dir))
+        results = search_pdfs("Druckbehälter")
+        assert len(results) == 1
+        assert results[0]["file"] == "hyphen.pdf"
+
+    def test_read_page_matches_indexed_text(self, temp_db, hyphenated_pdf_dir):
+        """Module invariant: read_pdf_page must return exactly the text
+        that was indexed, so a search hit is always visible in the page
+        the agent then reads."""
+        index_pdfs(str(hyphenated_pdf_dir))
+        page_text = read_pdf_page("hyphen.pdf", 1)
+        assert "Druckbehälter" in page_text
+        conn = sqlite3.connect(str(temp_db))
+        indexed = conn.execute(
+            "SELECT content FROM pages WHERE file = 'hyphen.pdf'"
+        ).fetchone()[0]
+        conn.close()
+        assert page_text == indexed
 
 
 # --- Indexing ---

@@ -105,7 +105,7 @@ _LIGATURES = {
     0xFB02: "fl",
     0xFB03: "ffi",
     0xFB04: "ffl",
-    0xFB05: "ft",
+    0xFB05: "st",  # long s + t: NFKD folds long s (ſ) to s, same as U+FB06
     0xFB06: "st",
 }
 
@@ -139,8 +139,10 @@ def _join_hyphen_break(match):
 def _normalize_text(text):
     """Normalize extracted page text for indexing and reading.
 
-    Pure function — must be applied identically wherever page text is
-    produced (module invariant), and any change requires a 'reindex'.
+    Pure and idempotent — the output is a fixed point, which
+    index_quality's stale check depends on. Must be applied identically
+    wherever page text is produced (module invariant), and any change
+    requires a 'reindex'.
 
     Args:
         text: Raw text from fitz get_text() (str).
@@ -158,7 +160,17 @@ def _normalize_text(text):
     # adjacency the join regex requires — stripping afterwards leaves
     # the break unjoined and the split word unsearchable.
     text = text.replace("\u00ad", "")
-    return _HYPHEN_BREAK_RE.sub(_join_hyphen_break, text)
+    # Join repeatedly until stable: a join consumes its continuation
+    # character, so chains of single-character fragments ('a-/b-/c')
+    # leave a residual joinable break after one pass. Every pass removes
+    # at least one break, so the loop terminates. The stable output makes
+    # _normalize_text idempotent, which index_quality's fixpoint check
+    # relies on: a fresh index must report zero stale pages.
+    while True:
+        joined = _HYPHEN_BREAK_RE.sub(_join_hyphen_break, text)
+        if joined == text:
+            return joined
+        text = joined
 
 
 def _extract_text(page):
@@ -1082,7 +1094,8 @@ def index_quality():
           indexed pages — scanned PDFs without a text layer.
         - pages_stale_normalization (int): pages whose stored text is not
           a fixed point of _normalize_text — the index predates the
-          current normalization rules.
+          current normalization rules (fresh indexes are fixed points
+          by construction, so any nonzero count means reindex).
         - pages_replacement_char (int): pages containing U+FFFD (font
           without a usable Unicode mapping; text is unrecoverable).
         - pages_near_empty (int): pages with fewer than _NEAR_EMPTY_CHARS

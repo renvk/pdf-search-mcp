@@ -36,7 +36,7 @@ def run(coro):
 class TestSearch:
     def test_formatted_output(self, indexed_db):
         """Output should have [1] numbering and p. page references."""
-        result = run(search("pressure"))
+        result = run(search("process"))
         assert "[1]" in result
         assert "p." in result
 
@@ -49,7 +49,7 @@ class TestSearch:
         """'NOT term' is invalid FTS5 — the tool must return the error as
         text instead of leaking an exception through the MCP layer (and
         must NOT mask it as 'No results found.')."""
-        result = run(search("NOT pressure"))
+        result = run(search("NOT process"))
         assert isinstance(result, str)
         assert result != "No results found."
         assert "Search failed" in result
@@ -67,12 +67,12 @@ class TestSearch:
     def test_negative_limit_returns_message(self, indexed_db):
         """limit=-1 previously fetched the entire corpus unbounded and then
         silently dropped the last result via rows[:limit]."""
-        result = run(search("pressure", limit=-1))
+        result = run(search("process", limit=-1))
         assert "positive integer" in result
 
     def test_excessive_limit_clamped(self, indexed_db):
         """A huge limit is clamped, not an error — the query still runs."""
-        result = run(search("pressure", limit=10_000))
+        result = run(search("process", limit=10_000))
         assert "[1]" in result
 
 
@@ -81,20 +81,20 @@ class TestSearchRelaxation:
 
     def test_direct_match_no_relaxation(self, indexed_db):
         """When all terms match, no relaxation note appears."""
-        result = run(search("pressure vessels"))
+        result = run(search("process automation"))
         assert "[1]" in result
         assert "Relaxed" not in result
         assert "any term" not in result
 
     def test_relaxation_note_in_output(self, indexed_db):
         """When relaxation triggers, the note precedes the results."""
-        result = run(search("pressure vessels xyznonexistent"))
+        result = run(search("process automation xyznonexistent"))
         assert "[1]" in result
         assert "No matches for full query" in result
 
     def test_no_relaxation_for_operators(self, indexed_db):
         """Queries with explicit AND/OR/NOT bypass relaxation entirely."""
-        result = run(search("xyznonexistent AND pressure"))
+        result = run(search("xyznonexistent AND process"))
         # Should get no results (AND requires both), no relaxation attempted
         assert result == "No results found."
 
@@ -124,14 +124,14 @@ class TestSearchRelaxation:
 class TestReadPage:
     def test_returns_text(self, indexed_db):
         result = run(read_page("basics.pdf", 1))
-        assert "pressure vessels" in result
+        assert "process automation" in result
 
     def test_empty_subfolder_selects_root(self, indexed_db):
         """subfolder='' is the explicit root-folder selector and must reach
         the core layer unchanged — previously `subfolder or None` coerced
         it to 'unspecified', so root copies of duplicates were unselectable."""
         result = run(read_page("basics.pdf", 1, subfolder=""))
-        assert "pressure vessels" in result
+        assert "process automation" in result
 
     def test_duplicate_filename_returns_guidance(self, temp_db, sample_pdfs, make_pdf):
         """Ambiguous duplicates return an instructive error string instead

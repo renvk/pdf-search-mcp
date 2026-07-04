@@ -112,8 +112,8 @@ _LIGATURES = {
 # Line-end hyphenation: a letter, then '-' and a newline, then a word
 # character. _join_hyphen_break joins the fragments only when the
 # continuation is lowercase — a word split by line-break hyphenation
-# continues lowercase ('Druckbehäl-/ter'), while a genuine hyphenated
-# compound continues with a capital or a digit ('AD 2000-/Merkblatt')
+# continues lowercase ('Über-/schrift'), while a genuine hyphenated
+# compound continues with a capital or a digit ('Part A-/Module')
 # and must keep its hyphen.
 _HYPHEN_BREAK_RE = re.compile(r"([^\W\d_])-\n(\w)")
 
@@ -740,7 +740,7 @@ def _resolve_pdf_path(filename, subfolder=None):
     """Resolve a PDF filename to its full path on disk via the index.
 
     Args:
-        filename: PDF filename (e.g. 'EN_13445-3_2021.pdf').
+        filename: PDF filename (e.g. 'STD_4200-3_2021.pdf').
         subfolder: Subfolder to disambiguate duplicate filenames.
             '' selects the root folder explicitly; None means
             'unspecified' and is an error when duplicates exist.
@@ -831,7 +831,7 @@ def read_pdf_page(filename, page_num, subfolder=None):
     """Read full page text for a specific PDF and page number.
 
     Args:
-        filename: PDF filename (e.g. 'EN_13445-3_2021.pdf').
+        filename: PDF filename (e.g. 'STD_4200-3_2021.pdf').
         page_num: 1-based page number.
         subfolder: Subfolder to disambiguate duplicate filenames
             ('' = root folder, None = unspecified).
@@ -930,7 +930,7 @@ def render_pdf_page(filename, page_num, dpi=140, subfolder=None, region=None):
     resolution for the cropped area.
 
     Args:
-        filename: PDF filename (e.g. 'EN_13445-3_2021.pdf').
+        filename: PDF filename (e.g. 'STD_4200-3_2021.pdf').
         page_num: 1-based page number.
         dpi: Resolution for full-page rendering (default 140, must be >= 1).
             Ignored when region is set.

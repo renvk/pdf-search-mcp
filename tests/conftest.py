@@ -36,7 +36,7 @@ def sample_pdfs(tmp_path):
             basics.pdf          — 2 pages: English text + German text
             sparse.pdf          — 2 pages: empty page + page with content
             standards/
-                EN_13445-3.pdf  — 1 page: pressure equipment text
+                STD_4200-3.pdf  — 1 page: process automation text
             _drafts/
                 draft.pdf       — 1 page: should be skipped by indexer
     """
@@ -46,7 +46,7 @@ def sample_pdfs(tmp_path):
     # basics.pdf — 2 pages: English then German
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((72, 72), "This is a test document about pressure vessels and piping.")
+    page.insert_text((72, 72), "This is a test document about process automation and workflows.")
     page = doc.new_page()
     page.insert_text((72, 72), "Größe und Außendurchmesser der Schlüsselweite.")
     doc.save(str(pdfs_dir / "basics.pdf"))
@@ -60,13 +60,13 @@ def sample_pdfs(tmp_path):
     doc.save(str(pdfs_dir / "sparse.pdf"))
     doc.close()
 
-    # standards/EN_13445-3.pdf — 1 page
+    # standards/STD_4200-3.pdf — 1 page
     standards_dir = pdfs_dir / "standards"
     standards_dir.mkdir()
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((72, 72), "EN 13445-3 Unfired pressure vessels design by analysis.")
-    doc.save(str(standards_dir / "EN_13445-3.pdf"))
+    page.insert_text((72, 72), "STD 4200-3 Process automation design and analysis.")
+    doc.save(str(standards_dir / "STD_4200-3.pdf"))
     doc.close()
 
     # _drafts/draft.pdf — 1 page (should be skipped)

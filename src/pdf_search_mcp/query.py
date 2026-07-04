@@ -178,7 +178,7 @@ def _prepare_near(near_expr: str) -> str:
     """Canonicalize and expand one NEAR() expression.
 
     Inputs: a string matched by _NEAR_RE — any case, optional whitespace
-    before the paren, e.g. 'near (13445-3 Anhang, 10)'.
+    before the paren, e.g. 'near (4200-3 Anhang, 10)'.
     Returns valid FTS5: keyword uppercased, inner terms quoted when they
     contain non-word characters, German variants expanded by OR-ing whole
     NEAR expressions:

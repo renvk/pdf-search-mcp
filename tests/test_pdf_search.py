@@ -41,35 +41,35 @@ class TestNormalizeText:
 
     def test_joins_hyphenated_line_break(self):
         """A word split by line-break hyphenation is indexed as two junk
-        tokens ('Druckbehäl' + 'ter') — the query 'Druckbehälter' misses
+        tokens ('Über' + 'schrift') — the query 'Überschrift' misses
         it. Lowercase continuation marks a split word, so the fragments
         are joined and the consumed newline collapses the two lines."""
         assert (
-            _normalize_text("Der Druckbehäl-\nter ist geprüft.")
-            == "Der Druckbehälter ist geprüft."
+            _normalize_text("Die Über-\nschrift ist zentriert.")
+            == "Die Überschrift ist zentriert."
         )
 
     def test_joins_consecutive_hyphen_breaks(self):
         """A long compound can wrap twice; sequential re.sub scanning must
         join both breaks, not just the first."""
         assert (
-            _normalize_text("Wärmeübertra-\ngungsflä-\nche")
-            == "Wärmeübertragungsfläche"
+            _normalize_text("Zusam-\nmenfas-\nsung")
+            == "Zusammenfassung"
         )
 
     def test_keeps_hyphen_before_uppercase(self):
-        """'AD 2000-\\nMerkblatt' is a genuine hyphenated compound wrapped
-        at its hyphen — joining would create the junk token
-        '2000Merkblatt'. Uppercase continuation must keep the hyphen
+        """A letter, then '-\\n', then an uppercase continuation ('Teil A-\\nModul')
+        is a genuine hyphenated compound, not a wrapped word — joining would
+        lose the boundary. Uppercase continuation must keep the hyphen
         (and the line break) intact."""
-        text = "Das AD 2000-\nMerkblatt B1 gilt."
+        text = "Der Teil A-\nModul bleibt."
         assert _normalize_text(text) == text
 
     def test_keeps_hyphen_before_digit(self):
-        """Standard designations wrap at their hyphen with a digit
-        continuation ('EN 13445-\\n3') — digits are not lowercase, so the
-        hyphen must survive."""
-        text = "Nach EN 13445-\n3 berechnet."
+        """A letter, then '-\\n', then a digit continuation ('Teil A-\\n2')
+        is a genuine hyphenated designation — digits are not lowercase, so
+        the hyphen must survive."""
+        text = "Siehe Teil A-\n2 unten."
         assert _normalize_text(text) == text
 
     def test_keeps_hyphen_after_digit(self):
@@ -81,8 +81,8 @@ class TestNormalizeText:
 
     def test_strips_soft_hyphens(self):
         """Soft hyphens (U+00AD) are invisible in print but split FTS5
-        tokens — 'Druck\\u00adbehälter' never matches 'Druckbehälter'."""
-        assert _normalize_text("Druck­behälter") == "Druckbehälter"
+        tokens — 'Über\\u00adschrift' never matches 'Überschrift'."""
+        assert _normalize_text("Über­schrift") == "Überschrift"
 
     def test_soft_hyphen_adjacent_to_hyphen_break(self):
         """Publisher PDFs emit a soft hyphen next to the printed hyphen at
@@ -122,9 +122,9 @@ class TestNormalizeText:
 class TestNormalizationEndToEnd:
     @pytest.fixture
     def hyphenated_pdf_dir(self, tmp_path):
-        """One PDF whose page text wraps 'Druckbehälter' across two lines
+        """One PDF whose page text wraps 'Überschrift' across two lines
         with a hyphen — two insert_text calls 14pt apart extract as
-        'Druckbehäl-\\nter' (verified against PyMuPDF), reproducing real
+        'Über-\\nschrift' (verified against PyMuPDF), reproducing real
         line-break hyphenation."""
         import fitz
 
@@ -132,8 +132,8 @@ class TestNormalizationEndToEnd:
         pdfs_dir.mkdir()
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text((72, 72), "Der Druckbehäl-")
-        page.insert_text((72, 86), "ter ist geprüft.")
+        page.insert_text((72, 72), "Die Über-")
+        page.insert_text((72, 86), "schrift ist zentriert.")
         doc.save(str(pdfs_dir / "hyphen.pdf"))
         doc.close()
         return pdfs_dir
@@ -142,7 +142,7 @@ class TestNormalizationEndToEnd:
         """The whole point of dehyphenation: the joined compound must be
         findable by full-text search."""
         index_pdfs(str(hyphenated_pdf_dir))
-        results = search_pdfs("Druckbehälter")
+        results = search_pdfs("Überschrift")
         assert len(results) == 1
         assert results[0]["file"] == "hyphen.pdf"
 
@@ -152,7 +152,7 @@ class TestNormalizationEndToEnd:
         the agent then reads."""
         index_pdfs(str(hyphenated_pdf_dir))
         page_text = read_pdf_page("hyphen.pdf", 1)
-        assert "Druckbehälter" in page_text
+        assert "Überschrift" in page_text
         conn = sqlite3.connect(str(temp_db))
         indexed = conn.execute(
             "SELECT content FROM pages WHERE file = 'hyphen.pdf'"
@@ -205,11 +205,11 @@ class TestIndexPdfs:
         assert "last_indexed" in meta
 
     def test_records_subfolder(self, temp_db, sample_pdfs):
-        """EN_13445-3.pdf should have subfolder 'standards'."""
+        """STD_4200-3.pdf should have subfolder 'standards'."""
         index_pdfs(str(sample_pdfs))
         conn = sqlite3.connect(str(temp_db))
         row = conn.execute(
-            "SELECT subfolder FROM pages WHERE file = 'EN_13445-3.pdf' LIMIT 1"
+            "SELECT subfolder FROM pages WHERE file = 'STD_4200-3.pdf' LIMIT 1"
         ).fetchone()
         conn.close()
         assert row[0] == "standards"
@@ -227,9 +227,9 @@ class TestIndexPdfs:
     def test_returns_correct_stats(self, temp_db, sample_pdfs):
         """Fresh index: all files reported as added, totals match."""
         result = index_pdfs(str(sample_pdfs))
-        assert result["files_added"] == 3  # basics, sparse, EN_13445-3
+        assert result["files_added"] == 3  # basics, sparse, STD_4200-3
         assert result["total_files"] == 3
-        assert result["total_pages"] == 4  # basics p1+p2, sparse p2, EN_13445-3 p1
+        assert result["total_pages"] == 4  # basics p1+p2, sparse p2, STD_4200-3 p1
         assert result["files_updated"] == 0
         assert result["files_deleted"] == 0
 
@@ -326,25 +326,25 @@ class TestIndexPdfs:
 
 class TestSearchPdfs:
     def test_finds_content(self, indexed_db):
-        """'pressure' appears in basics.pdf and EN_13445-3.pdf."""
-        results = search_pdfs("pressure", limit=10)
+        """'process' appears in basics.pdf and STD_4200-3.pdf."""
+        results = search_pdfs("process", limit=10)
         files = {r["file"] for r in results}
-        assert "basics.pdf" in files or "EN_13445-3.pdf" in files
+        assert "basics.pdf" in files or "STD_4200-3.pdf" in files
 
     def test_snippets_have_markers(self, indexed_db):
         """Snippets should contain >>> and <<< highlight markers."""
-        results = search_pdfs("pressure", limit=1)
+        results = search_pdfs("process", limit=1)
         assert len(results) >= 1
         assert ">>>" in results[0]["snippet"]
         assert "<<<" in results[0]["snippet"]
 
     def test_results_have_only_public_keys(self, indexed_db):
         """Internal ranking fields must not leak into tool output."""
-        results = search_pdfs("pressure", limit=1)
+        results = search_pdfs("process", limit=1)
         assert set(results[0]) == {"file", "subfolder", "page", "snippet"}
 
     def test_limit_works(self, indexed_db):
-        results = search_pdfs("pressure", limit=1)
+        results = search_pdfs("process", limit=1)
         assert len(results) <= 1
 
     def test_no_results(self, indexed_db):
@@ -360,11 +360,11 @@ class TestSearchPdfs:
         """limit=-1 would become SQL 'LIMIT -3' (unlimited fetch) and the
         final slice would silently drop the last result."""
         with pytest.raises(PdfSearchError, match="positive integer"):
-            search_pdfs("pressure", limit=-1)
+            search_pdfs("process", limit=-1)
 
     def test_zero_limit_raises(self, indexed_db):
         with pytest.raises(PdfSearchError, match="positive integer"):
-            search_pdfs("pressure", limit=0)
+            search_pdfs("process", limit=0)
 
     def test_filename_tokens_do_not_match(self, indexed_db):
         """The file column is UNINDEXED: searching 'basics' (a filename,
@@ -399,7 +399,7 @@ class TestSearchPdfs:
         db_path = db_dir / "pdf_index.db"
         monkeypatch.setattr("pdf_search_mcp.pdf_search.DB_PATH", db_path)
         index_pdfs(str(sample_pdfs))
-        results = search_pdfs("pressure", limit=5)
+        results = search_pdfs("process", limit=5)
         assert results
         assert not (tmp_path / "c").exists()  # no stray truncated file
 
@@ -409,7 +409,7 @@ class TestSearchPdfs:
 
 class TestSearchWithRelaxation:
     def test_direct_match_no_note(self, indexed_db):
-        results, note = search_with_relaxation("pressure vessels", 10)
+        results, note = search_with_relaxation("process automation", 10)
         assert results
         assert note == ""
 
@@ -423,14 +423,14 @@ class TestSearchWithRelaxation:
     def test_drops_least_represented_term(self, indexed_db):
         """3+ terms with one nonexistent: phase 1 drops the term whose
         removal yields the most matches corpus-wide."""
-        results, note = search_with_relaxation("pressure vessels xyznonexistent", 10)
+        results, note = search_with_relaxation("process automation xyznonexistent", 10)
         assert results
         assert "Relaxed to" in note
         assert "xyznonexistent" not in note  # dropped term excluded from note
 
     def test_two_terms_or_fallback(self, indexed_db):
         """With 2 terms, phase 1 is skipped and the OR fallback runs."""
-        results, note = search_with_relaxation("pressure xyznonexistent", 10)
+        results, note = search_with_relaxation("process xyznonexistent", 10)
         assert results
         assert "any term" in note
 
@@ -441,7 +441,7 @@ class TestSearchWithRelaxation:
 
     def test_structured_query_not_relaxed(self, indexed_db):
         """Explicit operators bypass relaxation entirely."""
-        results, note = search_with_relaxation("xyznonexistent AND pressure", 10)
+        results, note = search_with_relaxation("xyznonexistent AND process", 10)
         assert results == []
         assert note == ""
 
@@ -470,7 +470,7 @@ class TestSearchWithRelaxation:
         surface as PdfSearchError, never as silent zero results — masking
         syntax errors as 'no matches' misleads the caller about the corpus."""
         with pytest.raises(PdfSearchError, match="Search failed"):
-            search_with_relaxation("NOT pressure", 10)
+            search_with_relaxation("NOT process", 10)
 
 
 # --- Read ---
@@ -480,7 +480,7 @@ class TestReadPdfPage:
     def test_returns_expected_text(self, indexed_db):
         """Page 1 of basics.pdf should contain our English test text."""
         text = read_pdf_page("basics.pdf", 1)
-        assert "pressure vessels" in text
+        assert "process automation" in text
 
     def test_page_out_of_range(self, indexed_db):
         with pytest.raises(PdfSearchError, match="out of range"):
@@ -532,7 +532,7 @@ class TestDuplicateResolution:
     def test_unique_file_needs_no_subfolder(self, dup_index):
         """Non-duplicated files keep resolving without a subfolder."""
         text = read_pdf_page("basics.pdf", 1)
-        assert "pressure vessels" in text
+        assert "process automation" in text
 
 
 # --- Quality report ---
@@ -922,7 +922,7 @@ class TestIncrementalIndex:
         assert result["files_added"] == 0
         assert result["total_files"] == 2
         # deleted file no longer searchable
-        hits = search_pdfs("pressure vessels")
+        hits = search_pdfs("process automation")
         assert not any(r["file"] == "basics.pdf" for r in hits)
 
     def test_file_changed(self, indexed_db, make_pdf):
@@ -938,7 +938,7 @@ class TestIncrementalIndex:
         # old content gone, new content searchable
         hits = search_pdfs("turbines")
         assert any(r["file"] == "basics.pdf" for r in hits)
-        hits = search_pdfs("pressure vessels")
+        hits = search_pdfs("process automation")
         assert not any(r["file"] == "basics.pdf" for r in hits)
 
     def test_mixed_changes(self, indexed_db, make_pdf):
@@ -947,7 +947,7 @@ class TestIncrementalIndex:
         # delete sparse.pdf
         (pdf_dir / "sparse.pdf").unlink()
         # modify basics.pdf
-        make_pdf(pdf_dir / "basics.pdf", "Updated basics about nozzles.")
+        make_pdf(pdf_dir / "basics.pdf", "Updated basics about widgets.")
         # add new.pdf
         make_pdf(pdf_dir / "new.pdf", "Brand new document about gaskets.")
 
@@ -955,7 +955,7 @@ class TestIncrementalIndex:
         assert result["files_added"] == 1
         assert result["files_deleted"] == 1
         assert result["files_updated"] == 1
-        assert result["files_unchanged"] == 1  # EN_13445-3.pdf
+        assert result["files_unchanged"] == 1  # STD_4200-3.pdf
         assert result["total_files"] == 3  # was 3, -1 +1 = 3
 
     def test_file_moved_to_drafts(self, indexed_db):
@@ -994,7 +994,7 @@ class TestIncrementalIndex:
         assert len(result["errors"]) == 1
         assert result["files_updated"] == 1  # attempted update
         # Old content should still be searchable because rollback restored it
-        hits = search_pdfs("pressure vessels")
+        hits = search_pdfs("process automation")
         assert any(r["file"] == "basics.pdf" for r in hits)
 
 

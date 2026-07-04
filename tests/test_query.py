@@ -112,7 +112,7 @@ class TestTokenVariants:
 
 class TestQuoteTerm:
     def test_hyphens_quoted(self):
-        assert _quote_term("EN-13445") == '"EN-13445"'
+        assert _quote_term("STD-4200") == '"STD-4200"'
 
     def test_dots_quoted(self):
         assert _quote_term("v2.1") == '"v2.1"'
@@ -126,10 +126,10 @@ class TestQuoteTerm:
         assert _quote_term("1:100") == '"1:100"'
 
     def test_prefix_wildcard_preserved(self):
-        assert _quote_term("EN-13445*") == '"EN-13445"*'
+        assert _quote_term("STD-4200*") == '"STD-4200"*'
 
     def test_plain_word_unchanged(self):
-        assert _quote_term("pressure") == "pressure"
+        assert _quote_term("process") == "process"
 
     def test_german_word_unchanged(self):
         """Umlauts/eszett are word characters — no quoting needed."""
@@ -157,8 +157,8 @@ class TestNearPreservation:
         assert len(saved) == 2
 
     def test_no_nears(self):
-        query, saved = _preserve_near("pressure vessel")
-        assert query == "pressure vessel"
+        query, saved = _preserve_near("process automation")
+        assert query == "process automation"
         assert saved == []
 
     def test_whitespace_before_paren_extracted(self):
@@ -192,8 +192,8 @@ class TestPrepareNear:
     def test_inner_terms_quoted(self):
         """Bug #Q3: special-char terms inside NEAR were never auto-quoted,
         contradicting the tool docstring and failing with a syntax error."""
-        result = _prepare_near("NEAR(13445-3 Anhang, 10)")
-        assert '"13445-3"' in result
+        result = _prepare_near("NEAR(4200-3 Anhang, 10)")
+        assert '"4200-3"' in result
         assert _fts5_accepts(result)
 
     def test_empty_near_returns_empty(self):
@@ -227,39 +227,39 @@ class TestBalanceParens:
 
 class TestExtractTerms:
     def test_simple_terms(self):
-        assert extract_terms("pressure vessels piping") == ["pressure", "vessels", "piping"]
+        assert extract_terms("process automation workflows") == ["process", "automation", "workflows"]
 
     def test_quoted_phrase_kept_whole(self):
         """A quoted phrase counts as one droppable term."""
-        assert extract_terms('"AD 2000" Merkblatt') == ['"AD 2000"', "Merkblatt"]
+        assert extract_terms('"heat transfer" coefficient') == ['"heat transfer"', "coefficient"]
 
     def test_prefix_with_quotes(self):
         """Quoted prefix search preserved as single term."""
-        assert extract_terms('"EN-13445"* design') == ['"EN-13445"*', "design"]
+        assert extract_terms('"STD-4200"* design') == ['"STD-4200"*', "design"]
 
     def test_returns_none_for_and(self):
         """Explicit AND means the user structured the query — don't relax."""
-        assert extract_terms("pressure AND vessels") is None
+        assert extract_terms("process AND automation") is None
 
     def test_returns_none_for_or(self):
-        assert extract_terms("pressure OR vessels") is None
+        assert extract_terms("process OR automation") is None
 
     def test_returns_none_for_not(self):
-        assert extract_terms("pressure NOT vessels") is None
+        assert extract_terms("process NOT automation") is None
 
     def test_returns_none_for_near(self):
-        assert extract_terms("NEAR(pressure vessels, 5)") is None
+        assert extract_terms("NEAR(process automation, 5)") is None
 
     def test_returns_none_for_parens(self):
         """Parenthesized groups are structured queries — dropping a term
         from inside a group would change the user's intended logic."""
-        assert extract_terms("(pressure OR vessels) design") is None
+        assert extract_terms("(process OR automation) design") is None
 
     def test_returns_none_for_empty(self):
         assert extract_terms("") is None
 
     def test_single_term(self):
-        assert extract_terms("pressure") == ["pressure"]
+        assert extract_terms("process") == ["process"]
 
     def test_case_sensitive_operators(self):
         """Lowercase 'and' is a regular word in FTS5, not an operator."""
@@ -276,13 +276,13 @@ class TestPrepareQuery:
 
     def test_english_words_with_digraphs_expanded(self):
         """English words containing digraph substrings get expanded."""
-        result = prepare_query("pressure vessel")
+        result = prepare_query("process automation")
         assert "OR" in result
 
     def test_hyphenated_and_german(self):
-        result = prepare_query("EN-13445 Größe")
+        result = prepare_query("STD-4200 Größe")
         # Hyphen should be quoted
-        assert '"EN-13445"' in result
+        assert '"STD-4200"' in result
         # German expansion
         assert "Groesse" in result
 
@@ -294,7 +294,7 @@ class TestPrepareQuery:
         assert prepare_query("") == ""
 
     def test_fts5_operators_preserved(self):
-        result = prepare_query("Größe OR pressure")
+        result = prepare_query("Größe OR process")
         assert " OR " in result
 
     def test_apostrophe_stripped(self):
@@ -320,8 +320,8 @@ class TestPrepareQuery:
     def test_prefix_wildcard_with_german(self):
         """Bug #18 regression: the * must stay attached to the quoted token
         when the query also triggers German expansion."""
-        result = prepare_query("EN-13445* Größe")
-        assert '"EN-13445"*' in result
+        result = prepare_query("STD-4200* Größe")
+        assert '"STD-4200"*' in result
 
     def test_quoted_phrase_expansion(self):
         result = prepare_query('"Größe"')
@@ -338,25 +338,25 @@ class TestPrepareQueryAlwaysValidFts5:
 
     CASES = [
         "Maßstab 1:100",                    # Q1: colon → 'no such column'
-        "(pressure OR pipe)",               # Q2: group + one expandable token → unbalanced parens
-        "(pressure OR vessel)",             # Q2: group + two expandable tokens
-        "NEAR(13445-3 Anhang, 10)",         # Q3: unquoted special chars inside NEAR
+        "(process OR workflow)",            # Q2: group + one expandable token → unbalanced parens
+        "(process OR automation)",          # Q2: group + two expandable tokens
+        "NEAR(4200-3 Anhang, 10)",          # Q3: unquoted special chars inside NEAR
         "near(Anhang Groesse, 5)",          # Q4a: lowercase near rejected by FTS5
         "NEAR (Anhang Groesse, 5)",         # Q4b: whitespace before paren skipped preservation
         '"Größe"* test',                    # Q5: quoted-prefix phrase + German expansion detached the star
-        "nozzle NEAR(Schlüssel weite, 5)",  # Q6: restored group adjacent to term without AND
+        "widget NEAR(Schlüssel weite, 5)",  # Q6: restored group adjacent to term without AND
         'foo"',                             # S2: unterminated string
         "foo:bar",                          # S2: column filter
         "*foo",                             # S2: 'unknown special query'
-        "EN 13445 (",                       # S1: stray paren was masked as 'no results'
+        "STD 4200 (",                       # S1: stray paren was masked as 'no results'
         "Test \"unbalanced",                # stray quote mid-query
         "NEAR(, 5) test",                   # empty NEAR must not leave a dangling AND
         "((a) (b",                          # nested unbalanced groups
         ")(",                               # pure noise
         "a -b +c ^d",                       # FTS5 metacharacters
         # PR-review round 2: dangling operators (each rejected by FTS5 before)
-        "pressure AND",                     # trailing operator after expansion group
-        "OR pressure",                      # leading operator
+        "process AND",                      # trailing operator after expansion group
+        "OR process",                       # leading operator
         "a OR (",                           # operator left dangling by paren repair
         "a OR NEAR(, 5)",                   # operator left dangling by empty-NEAR drop
         "xyznonexistent *",                 # term that prepares to nothing -> dangling OR in relaxation
@@ -382,12 +382,12 @@ class TestPrepareQueryAlwaysValidFts5:
 
     def test_group_adjacent_to_term_gets_and(self):
         """Bug #Q6: FTS5 rejects 'term (group)' — explicit AND required."""
-        result = prepare_query("nozzle NEAR(Schlüssel weite, 5)")
-        assert "nozzle AND (" in result
+        result = prepare_query("widget NEAR(Schlüssel weite, 5)")
+        assert "widget AND (" in result
 
     def test_trailing_operator_trimmed(self):
-        """'pressure AND' previously expanded to '(...) AND' — rejected."""
-        assert prepare_query("pressure AND") == "(pressure OR preßure)"
+        """'process AND' previously expanded to '(...) AND' — rejected."""
+        assert prepare_query("process AND") == "(process OR proceß)"
 
     def test_leading_operator_trimmed(self):
         assert prepare_query("OR bolt") == "bolt"

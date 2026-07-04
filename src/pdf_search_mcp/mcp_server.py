@@ -81,7 +81,7 @@ async def search(query: str, limit: int = 10) -> str:
 
     Terms with special characters (dots, hyphens, colons, slashes, ...)
     are auto-quoted — FTS5 treats them as token separators. You can also
-    quote them yourself: "13445-3", "v2.1".
+    quote them yourself: "4200-3", "v2.1".
 
     German ß↔ss / ä↔ae / ö↔oe / ü↔ue variants are expanded automatically.
 

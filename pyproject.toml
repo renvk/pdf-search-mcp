@@ -16,8 +16,9 @@ dependencies = [
     "PyMuPDF>=1.24.0",
     # >=1.8.0: first SDK release where FastMCP.run() accepts
     # transport="streamable-http" (1.7.x only knows stdio/sse)
-    # <2: mcp 2.x removed mcp.server.fastmcp (renamed MCPServer), so the
-    # server fails at import; lift only after migrating mcp_server.py
+    # <2: mcp 2.x removed mcp.server.fastmcp (renamed MCPServer), which
+    # mcp_server.py and tests/test_mcp_server.py import, so the server
+    # fails at import; lift only after migrating both
     "mcp>=1.8.0,<2",
     "anyio>=4.0",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",

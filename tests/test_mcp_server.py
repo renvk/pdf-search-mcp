@@ -366,6 +366,53 @@ class TestMainTransportDispatch:
                     main()
                 assert srv._HTTP_TRANSPORT is True
 
+    def test_allowed_hosts_env_admits_listed_host_header(self, monkeypatch):
+        """Clients on other machines send their own address as the Host
+        header; mcp >= 1.23 answers 421 unless it is allowed. Drives
+        main() against a fresh FastMCP (the module server stays
+        untouched) and posts initialize through the real HTTP app: the
+        listed host must get 200, an unlisted one must still get 421.
+        192.0.2.10 (RFC 5737) and example.com are documentation names."""
+        from mcp.server.fastmcp import FastMCP
+        from starlette.testclient import TestClient
+
+        import pdf_search_mcp.mcp_server as srv
+
+        server = FastMCP("allowed-hosts-test")
+        monkeypatch.setattr(server, "run", lambda transport=None: None)
+        monkeypatch.setenv("PDF_SEARCH_ALLOWED_HOSTS", " 192.0.2.10:* ,")
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        with patch.object(srv, "mcp", server):
+            with patch.object(srv, "_HTTP_TRANSPORT", False):
+                with patch("sys.argv", ["pdf-search-mcp", "--transport", "http"]):
+                    main()
+        with TestClient(server.streamable_http_app()) as client:
+            listed = client.post(
+                "/mcp",
+                json=initialize,
+                headers={**headers, "Host": "192.0.2.10:8000"},
+            )
+            unlisted = client.post(
+                "/mcp",
+                json=initialize,
+                headers={**headers, "Host": "example.com:8000"},
+            )
+        assert listed.status_code == 200
+        assert unlisted.status_code == 421
+
     def test_stdio_keeps_path_mode(self):
         """Plain `pdf-search-mcp` must never enable image-content mode —
         stdio clients rely on the documented path-based return."""

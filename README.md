@@ -87,6 +87,12 @@ The MCP endpoint is `http://<server>:8000/mcp`. Connecting from Claude Code:
 claude mcp add --transport http --scope user pdf-search http://<server>:8000/mcp
 ```
 
+With mcp 1.23 or newer, a request addressed to any name other than localhost gets `421 Invalid Host header` unless that Host header value is listed in `PDF_SEARCH_ALLOWED_HOSTS` (comma-separated; `host:*` matches any port):
+
+```bash
+PDF_SEARCH_ALLOWED_HOSTS="192.0.2.10:*,example.com:*" pdf-search-mcp --transport http --host 0.0.0.0 --port 8000
+```
+
 > **Security:** the HTTP transport has no authentication or TLS. Run it only on trusted networks (LAN, VPN) and never expose it to the internet. The default `--host 127.0.0.1` keeps it local to the machine; binding `0.0.0.0` is an explicit opt-in.
 
 > **Note:** over HTTP, `read_page_image` returns the rendered PNG as inline MCP image content, so page rendering works for clients on other machines (including clients without filesystem access, such as Claude Desktop). Over stdio it returns a file path for the client to open, as before.

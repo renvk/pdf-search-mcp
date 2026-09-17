@@ -14,12 +14,14 @@ license = "MIT"
 authors = [{name = "ren", email = "ren@virku.ai"}]
 dependencies = [
     "PyMuPDF>=1.24.0",
-    # >=1.8.0: first SDK release where FastMCP.run() accepts
-    # transport="streamable-http" (1.7.x only knows stdio/sse)
+    # >=1.12.0: first SDK release that serves the streamable-HTTP endpoint
+    # at /mcp itself (1.11.x and older answer POST /mcp with a 307
+    # redirect to /mcp/); it also has settings.transport_security, which
+    # main() sets for PDF_SEARCH_ALLOWED_HOSTS
     # <2: mcp 2.x removed mcp.server.fastmcp (renamed MCPServer), which
     # mcp_server.py and tests/test_mcp_server.py import, so the server
     # fails at import; lift only after migrating both
-    "mcp>=1.8.0,<2",
+    "mcp>=1.12.0,<2",
     "anyio>=4.0",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]

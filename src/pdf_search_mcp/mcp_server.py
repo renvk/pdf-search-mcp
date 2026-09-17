@@ -22,11 +22,13 @@ have to duplicate.
 """
 
 import argparse
+import os
 import sys
 from functools import partial
 
 import anyio
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .pdf_search import (
     DB_PATH,
@@ -317,6 +319,28 @@ def main():
         # default) — clients connect to http://<host>:<port>/mcp.
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+        # mcp >= 1.23 enables DNS-rebinding protection for a server built
+        # with the default loopback host and keeps it after the host
+        # changes, so requests addressed to any other name get 421.
+        # PDF_SEARCH_ALLOWED_HOSTS: comma-separated Host header values
+        # ("host:port", or "host:*" for any port) accepted in addition to
+        # loopback. Unset or blank leaves the SDK default untouched.
+        extra_hosts = [
+            h.strip()
+            for h in os.environ.get("PDF_SEARCH_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        if extra_hosts:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"]
+                + extra_hosts,
+                allowed_origins=[
+                    "http://127.0.0.1:*",
+                    "http://localhost:*",
+                    "http://[::1]:*",
+                ],
+            )
         mcp.run(transport="streamable-http")
     else:
         mcp.run()
